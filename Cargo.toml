@@ -34,15 +34,15 @@ expect_used = "warn"
 panic = "warn"
 
 [dependencies]
-tokio = { version = "1.49.0", features = ["full"] }
-tokio-stream = { version = "0.1.18", features = ["sync"] }
-tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
-futures-util = { version = "0.3.31", default-features = false, features = ["sink", "std"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-thiserror = "2.0.17"
+tokio = { version = "1.53.2", features = ["full"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tokio-tungstenite = { version = "0.30.0", features = ["native-tls"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.153"
+thiserror = "2.0.21"
 tracing = "0.1.44"
-oneshot = "0.1.11"
+oneshot = { version = "0.2.1", features = ["async"] }
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

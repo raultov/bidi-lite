@@ -101,3 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `network.authRequired`; skipped unless `PROXY_*` are set).
 - `make e2e` (`tests/run_all_e2e.sh`): runs every example against a real
   Firefox and checks its output; not part of `make check`.
+
+### Changed
+- Dependencies updated to their latest releases: tokio 1.53, tokio-stream 0.1.19,
+  tokio-tungstenite 0.30, futures-util 0.3.34, serde 1.0.229, serde_json 1.0.153,
+  thiserror 2.0.21, oneshot 0.2 (with its `async` feature, now opt-in) and, for
+  the examples, tracing-subscriber 0.3.23.
