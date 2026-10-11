@@ -177,6 +177,22 @@ impl RdpClient {
         }
     }
 
+    /// Sends `{"to": to, "type": method, ..params}` and does not wait for a reply.
+    ///
+    /// For the RDP methods declared one-way, such as the watcher's `unwatchTargets`
+    /// and `unwatchResources`: the server never answers them, so going through
+    /// [`RdpClient::request`] would wait until the timeout and, since an actor
+    /// answers in order, leave that actor's queue blocked behind a reply that will
+    /// never come. The packet is written at once, not ordered with respect to
+    /// requests still queued for the same actor.
+    pub fn send_oneway<P: Serialize>(&self, to: &str, method: &str, params: P) -> BidiResult<()> {
+        let payload = encode_request(to, method, params)?;
+        if !self.is_connected() {
+            return Err(BidiError::Disconnected);
+        }
+        transport::send(&self.connection, payload)
+    }
+
     /// A raw receiver of every notification on the connection.
     pub fn subscribe(&self) -> broadcast::Receiver<RdpPacket> {
         self.event_tx.subscribe()
@@ -200,6 +216,11 @@ impl RdpClient {
             .get("tabs")
             .ok_or_else(|| BidiError::missing_field("listTabs", "tabs"))?;
         Ok(serde_json::from_value(tabs.clone())?)
+    }
+
+    /// The timeout every request of this client is bounded by.
+    pub(crate) fn default_timeout(&self) -> Duration {
+        self.default_timeout
     }
 
     /// Whether the reader task still sees an open socket.
@@ -820,6 +841,68 @@ mod tests {
         server.push(rdp_reply("thread1", json!({ "answer": 1 })));
         assert_eq!(finish(first).await.expect("reply").body["answer"], 1);
         server.assert_no_command(QUIET).await;
+    }
+
+    /// RDP-23: A one-way request is sent and not waited for.
+    #[tokio::test]
+    async fn oneway_request_is_sent_and_not_awaited() {
+        // Given a connected client and a server that never answers
+        let mut server = MockServer::start_rdp(silent()).await;
+        let client = connected(&server).await;
+
+        // When a one-way request is sent
+        client
+            .send_oneway(
+                "watcher1",
+                "unwatchTargets",
+                json!({ "targetType": "frame" }),
+            )
+            .expect("it is written");
+
+        // Then the server receives it, flat like any request
+        assert_eq!(
+            server.next_command().await,
+            json!({ "to": "watcher1", "type": "unwatchTargets", "targetType": "frame" })
+        );
+        // And nothing is left waiting for a reply
+        assert_eq!(tracked_actors(&client), 0);
+    }
+
+    /// RDP-24: A one-way request does not disturb the queue of its actor.
+    #[tokio::test]
+    async fn oneway_request_does_not_disturb_the_actor_queue() {
+        // Given a request on the wire to the watcher
+        let mut server = MockServer::start_rdp(silent()).await;
+        let client = connected(&server).await;
+        let pending = call(&client, "watcher1", "watchResources");
+        server.next_command().await;
+
+        // When a one-way request goes to the same actor in the meantime
+        client
+            .send_oneway("watcher1", "unwatchResources", NoParams)
+            .expect("it is written");
+        assert_eq!(server.next_command().await["type"], "unwatchResources");
+
+        // Then the reply still resolves the request that was waiting
+        server.push(rdp_reply("watcher1", json!({ "answer": 1 })));
+        assert_eq!(finish(pending).await.expect("reply").body["answer"], 1);
+    }
+
+    /// RDP-25: A one-way request on a dead connection fails with `Disconnected`.
+    #[tokio::test]
+    async fn oneway_request_on_dead_connection_is_disconnected() {
+        // Given a connection the server has closed
+        let server = MockServer::start_rdp(silent()).await;
+        let client = connected(&server).await;
+        server.close();
+        let call = call(&client, "a", "m");
+        let _ = finish(call).await;
+
+        // When a one-way request is sent
+        let result = client.send_oneway("a", "m", NoParams);
+
+        // Then it fails at once
+        assert!(matches!(result, Err(BidiError::Disconnected)), "{result:?}");
     }
 
     /// RDP-21: Dropping every client closes the socket.

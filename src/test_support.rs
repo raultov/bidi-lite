@@ -132,11 +132,15 @@ impl MockServer {
 
     /// Next command whose `method` equals `method`, skipping the others.
     ///
-    /// BiDi only: RDP requests carry `type` instead, which lands with the RDP client.
+    /// Matches BiDi commands by `method` and RDP requests by `type`.
     pub(crate) async fn next_command_named(&mut self, method: &str) -> Value {
         loop {
             let command = self.next_command().await;
-            if command["method"].as_str() == Some(method) {
+            // BiDi names the command in `method`, RDP in `type`.
+            let name = command["method"]
+                .as_str()
+                .or_else(|| command["type"].as_str());
+            if name == Some(method) {
                 return command;
             }
         }
@@ -349,6 +353,10 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/bidi/session-status-busy.json"),
     ),
     (
+        "rdp/breakpoint-positions.json",
+        include_str!("../tests/fixtures/rdp/breakpoint-positions.json"),
+    ),
+    (
         "rdp/evaluate-reply.json",
         include_str!("../tests/fixtures/rdp/evaluate-reply.json"),
     ),
@@ -377,12 +385,24 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/rdp/resources-sources.json"),
     ),
     (
+        "rdp/resources-thread-state-paused.json",
+        include_str!("../tests/fixtures/rdp/resources-thread-state-paused.json"),
+    ),
+    (
+        "rdp/resources-thread-state-resumed.json",
+        include_str!("../tests/fixtures/rdp/resources-thread-state-resumed.json"),
+    ),
+    (
         "rdp/source-long-string.json",
         include_str!("../tests/fixtures/rdp/source-long-string.json"),
     ),
     (
         "rdp/target-available.json",
         include_str!("../tests/fixtures/rdp/target-available.json"),
+    ),
+    (
+        "rdp/target-destroyed.json",
+        include_str!("../tests/fixtures/rdp/target-destroyed.json"),
     ),
     (
         "rdp/thread-state-paused.json",
@@ -519,6 +539,8 @@ fn default_rdp_replies(to: &str, kind: &str) -> Vec<Value> {
             fixture("rdp/resources-sources.json"),
             rdp_reply(to, json!({})),
         ],
+        // One-way requests: Firefox never answers them.
+        "unwatchTargets" | "unwatchResources" => Vec::new(),
         _ => vec![rdp_reply(to, json!({}))],
     }
 }
@@ -780,6 +802,45 @@ mod tests {
 
         // Then the server reports the end of the connection
         server.wait_until_closed().await;
+    }
+
+    /// MCK-13: `next_command_named` matches RDP requests by their `type`.
+    #[tokio::test]
+    async fn next_command_named_matches_rdp_types() {
+        // Given a server that received a BiDi command and then an RDP request
+        let mut server = MockServer::start(silent()).await;
+        let mut client = connect_raw(&server.ws_url()).await;
+        send_raw(
+            &mut client,
+            json!({ "id": 1, "method": "a.b", "params": {} }),
+        )
+        .await;
+        send_raw(
+            &mut client,
+            json!({ "to": "watcher1", "type": "watchTargets" }),
+        )
+        .await;
+
+        // When the RDP request is asked for by its type
+        let wanted = server.next_command_named("watchTargets").await;
+
+        // Then it is returned
+        assert_eq!(wanted["to"], "watcher1");
+    }
+
+    /// MCK-14: The RDP handler does not answer one-way requests, like Firefox.
+    #[test]
+    fn rdp_handler_stays_silent_on_oneway_requests() {
+        let handler = rdp_firefox_like(vec![]);
+        for kind in ["unwatchTargets", "unwatchResources"] {
+            // Then nothing is sent back
+            assert!(
+                handler(&json!({ "to": "watcher1", "type": kind })).is_empty(),
+                "{kind}"
+            );
+        }
+        // And an ordinary request still gets its reply
+        assert!(!handler(&json!({ "to": "watcher1", "type": "watchTargets" })).is_empty());
     }
 
     /// MCK-12: `wait_until_closed` fails when the client stays connected.

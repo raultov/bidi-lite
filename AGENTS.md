@@ -100,7 +100,8 @@ src/
 ├── event_filter.rs   EventFilter<T>: module/context (BiDi) or type/actor (RDP) filters
 ├── browser.rs        BrowserClient, ContextInfo, ReadinessState
 ├── tab.rs            Tab: one top-level browsing context
-├── rdp/              Firefox RDP: protocol (RdpPacket), client (per-actor FIFO), debugger
+├── rdp/              Firefox RDP: protocol (RdpPacket), client (per-actor FIFO),
+│                     resources (types, pure parsers), debugger
 └── test_support.rs   #[cfg(test)] in-process mock WebSocket server (BiDi and RDP modes)
 examples/             one runnable program per cdp-lite example; need a real Firefox
 tests/

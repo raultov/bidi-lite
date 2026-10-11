@@ -70,3 +70,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handed to the next request. An RDP error surfaces as the same
   `BidiError::ProtocolError` as a BiDi one (`BidiError::from_rdp`), and
   `EventFilter` gains `rdp_type` and `rdp_actor` for the notifications.
+  `RdpClient::send_oneway` sends the requests Firefox never answers (the
+  watcher's `unwatchTargets` and `unwatchResources`).
+- `rdp::debugger::Debugger`, JavaScript debugging over RDP: `attach`,
+  `attach_by_url`, `attach_selected`; sources (`sources`, `source_text`,
+  `find_in_sources`, `on_sources`); `set_breakpoint` / `remove_breakpoint`
+  (optionally conditional); `set_pause_on_exceptions`; `pause`, `resume`,
+  `step_over`, `step_into`, `step_out`; `on_thread_state`; `frames`,
+  `frame_environment`, `evaluate_on_frame` and `evaluate`; `detach`. Breakpoints
+  go through the watcher's breakpoint list, so they survive reloads and
+  navigations; without a column the first breakable position of the line is
+  used. Every navigation, reload included, gives the tab a new thread and
+  console actor, which the debugger follows. `detach` removes the breakpoints
+  it set before unwatching, because a breakpoint left behind freezes the page.
+  Types and pure parsers (`SourceInfo`, `BreakpointLocation`, `FrameInfo`,
+  `ThreadState`, `Evaluation`, `PauseOnExceptions`, `parse_thread_states`,
+  `parse_sources`, `locate`...) live in `rdp::resources` and are re-exported
+  from `rdp::debugger`. Checked against Firefox 157.

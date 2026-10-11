@@ -3,3 +3,4 @@
 pub mod client;
 pub mod debugger;
 pub mod protocol;
+pub mod resources;
