@@ -10,9 +10,6 @@ pub mod event_filter;
 pub mod protocol;
 pub mod rdp;
 pub mod tab;
-// Compiled for tests only until `client.rs` uses it (phase 7): until then every
-// item is dead code, which fails the `-D warnings` gate.
-#[cfg(test)]
 mod transport;
 
 #[cfg(test)]
