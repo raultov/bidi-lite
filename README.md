@@ -182,24 +182,40 @@ use `http(s):`, `file:` or `about:blank`.
 
 ## Architecture
 
-**Two connections, one browser.** BiDi and RDP are separate WebSockets to the
-same Firefox. Both clients are cheap to clone; every clone shares its connection.
+**User, library, browser.** Your code calls typed Rust methods; bidi-lite turns
+them into JSON over two WebSockets to the same Firefox, and turns the replies
+and events that come back into `Result`s and `Stream`s.
 
 ```text
- ┌───────────────────── your code ─────────────────────┐
- │  BrowserClient ── Tab ── Tab        rdp::Debugger    │
- │        │                                 │           │
- │    BidiClient (Clone)               RdpClient (Clone)│
- └────────┼─────────────────────────────────┼───────────┘
-          │ WebSocket                       │ WebSocket
-          │ ws://127.0.0.1:9222/session     │ ws://127.0.0.1:6000
- ┌────────▼─────────────────────────────────▼───────────┐
- │ Firefox                                               │
- │  Remote Agent (WebDriver BiDi)   DevTools server (RDP)│
- │  tabs, navigation, script,       sources, breakpoints,│
- │  network, logs                   pause, frames, eval  │
- └───────────────────────────────────────────────────────┘
+ ┌─────────────────────────── your application ────────────────────────────┐
+ │  calls methods, awaits Results, reads event Streams                      │
+ │  browser.new_tab(..)   tab.navigate(..)   tab.on_module(..)              │
+ │  debugger.set_breakpoint(..)   debugger.on_thread_state()                │
+ └──────────────┬───────────────────────────────────────▲──────────────────┘
+                │ method calls                          │ Result<WsResponse | RdpPacket>
+                ▼                                       │ EventFilter streams
+ ┌─────────────────────────────── bidi-lite ───────────┴───────────────────┐
+ │  BrowserClient ── Tab                     rdp::Debugger                  │
+ │        │  (context placed per command)          │ (watcher, sources,     │
+ │        ▼                                        ▼  breakpoints, frames)  │
+ │  BidiClient                                RdpClient                     │
+ │   ids ↔ replies, session,                   per-actor FIFO queues        │
+ │   event ring + filters                      notification ring + filters  │
+ │        │                                        │                        │
+ │  transport: one WebSocket each; writer task + reader task (shared code)  │
+ └────────┼────────────────────────────────────────┼───────────────────────┘
+          │ ws://127.0.0.1:9222/session            │ ws://127.0.0.1:6000
+          │ JSON commands ⇄ replies + events       │ JSON requests ⇄ replies + notifications
+ ┌────────▼────────────────────────────────────────▼───────────────────────┐
+ │ Firefox                                                                  │
+ │  Remote Agent (WebDriver BiDi)          DevTools server (RDP)            │
+ │  tabs, navigation, script,              sources, breakpoints, pause,     │
+ │  network, logs                          frames, evaluation               │
+ └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+Both clients are cheap to clone; every clone shares its connection. The two
+connections are independent: BiDi works without the debugger port.
 
 **A BiDi command, round trip.** The caller gets a fresh id and waits on a
 `oneshot` channel; a writer task owns the socket's sink and a reader task routes
@@ -350,11 +366,17 @@ Each one runs against a real Firefox (`tests/firefox.sh start`):
 | `multi_tab` | Several tabs, per-tab listeners, context discovery |
 | `multi_tab_parallel` | Several pages loading at once over one connection |
 | `breakpoints_usage` | BiDi drives the page, the RDP debugger breaks in its script |
-| `proxy_usage` | A per-user-context authenticated proxy (needs `PROXY_HOST`, `PROXY_PORT`, `PROXY_USER`, `PROXY_PASS`) |
+| `proxy_usage` | A per-user-context authenticated proxy (needs `PROXY_HOST`, `PROXY_PORT`, `PROXY_USER`, `PROXY_PASS`). **Not tested against a real proxy** (see below) |
 
 ```bash
 cargo run --example breakpoints_usage
 ```
+
+> **`proxy_usage` is untested with a real proxy.** It was only run against an
+> unreachable proxy: Firefox accepted every command and routed the tab through
+> the proxy (the navigation was refused by it), and the example cleaned up. The
+> authentication step (`network.continueWithAuth` answering a 407) has never run
+> against a proxy that asks for credentials.
 
 ---
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- README: the architecture overview now shows the three layers (your
+  application, bidi-lite, Firefox) and what travels between them; `proxy_usage`
+  is flagged as untested against a real proxy.
+
 ## [0.1.0] - 2026-10-11
 
 ### Added

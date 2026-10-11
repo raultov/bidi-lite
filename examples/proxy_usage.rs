@@ -8,6 +8,9 @@
 //!
 //! Configuration comes from `PROXY_HOST`, `PROXY_PORT`, `PROXY_USER` and
 //! `PROXY_PASS`; without them the example skips. Needs Firefox with BiDi on 9222.
+//!
+//! Untested against a real proxy: only checked with an unreachable one (every command
+//! accepted, navigation refused by the proxy). The 407 answer has never run.
 
 use bidi_lite::browser::BrowserClient;
 use bidi_lite::error::{BidiError, BidiResult};
