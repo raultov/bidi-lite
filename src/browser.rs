@@ -86,6 +86,9 @@ pub struct BrowserClient {
 impl BrowserClient {
     /// Connects to the BiDi endpoint at `host` and starts a session with the
     /// default capabilities. See [`BidiClient::new`].
+    ///
+    /// Call [`BrowserClient::end`] when done: Firefox keeps the session after the
+    /// connection drops and allows only one.
     pub async fn connect(host: &str, default_timeout: Duration) -> BidiResult<Self> {
         Ok(Self::from_client(
             BidiClient::new(host, default_timeout).await?,

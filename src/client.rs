@@ -42,6 +42,14 @@ type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<WsResponse>>>>;
 ///
 /// Cloning is cheap and every clone shares the same connection, id counter and
 /// event ring. The socket is closed once the last clone is dropped.
+///
+/// # Ending the session
+///
+/// Dropping the client does **not** end the BiDi session. Firefox keeps the
+/// session after its connection is gone (checked on Firefox 157) and refuses
+/// to create another one (`Session already started`) until `session.end` is
+/// sent or the browser restarts; a new connection cannot end it. Call
+/// [`BidiClient::end_session`] when you are done.
 #[derive(Clone)]
 pub struct BidiClient {
     connection: Connection,

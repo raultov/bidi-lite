@@ -58,7 +58,8 @@ impl BidiClient {
     /// Connects to the BiDi endpoint at `host` and starts a session with
     /// [`default_capabilities`].
     ///
-    /// `host` is `"127.0.0.1:9222"` or a full URL; see [`session_url`].
+    /// `host` is `"127.0.0.1:9222"` or a full URL; see [`session_url`]. End the
+    /// session with [`BidiClient::end_session`] when done: Firefox allows only one.
     pub async fn new(host: &str, default_timeout: Duration) -> BidiResult<Self> {
         Self::new_with_capabilities(host, default_timeout, default_capabilities()).await
     }
@@ -127,6 +128,9 @@ impl BidiClient {
 
     /// `session.end`. Firefox closes the WebSocket afterwards, so a connection
     /// lost while waiting for the reply still counts as the session having ended.
+    ///
+    /// Call it when you are done: dropping the client leaves the session open,
+    /// and Firefox allows only one. See [`BidiClient`].
     pub async fn end_session(&self) -> BidiResult<()> {
         match self.send_raw_command("session.end", NoParams).await {
             Ok(_) | Err(BidiError::Disconnected) => {

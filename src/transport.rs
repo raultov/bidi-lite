@@ -120,8 +120,9 @@ async fn write_commands(
     }
 
     // Every handle is gone. Closing the socket here is what ends the reader
-    // loop: without it the reader keeps the connection (and, on Firefox, the
-    // single BiDi session) alive until the browser closes it.
+    // loop: without it the reader task would keep a half-open connection
+    // until the browser closes it. This does not end a BiDi session, which
+    // Firefox keeps until `session.end` (see `BidiClient::end_session`).
     let _ = sink.close().await;
 }
 
@@ -340,7 +341,7 @@ mod tests {
         // When every handle to the connection is dropped
         drop(connection);
 
-        // Then the server sees a close frame, so a BiDi session cannot outlive its client
+        // Then the server sees a close frame, so the reader task and the socket do not outlive the client
         let saw_close = timeout(WAIT, server)
             .await
             .expect("the socket stayed open after the last handle was dropped")
