@@ -1,0 +1,21 @@
+{
+  "type": "event",
+  "method": "log.entryAdded",
+  "params": {
+    "level": "info",
+    "source": {
+      "realm": "realm-1",
+      "context": "context-1"
+    },
+    "text": "Hello, world!",
+    "timestamp": 1700000000000,
+    "type": "console",
+    "method": "log",
+    "args": [
+      {
+        "type": "string",
+        "value": "Hello, world!"
+      }
+    ]
+  }
+}
