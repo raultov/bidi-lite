@@ -17,3 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error::codes` constants. BiDi error codes are strings, so
   `ProtocolError { error, message, stacktrace }` replaces cdp-lite's numeric
   `code`. `BidiError::from_response` builds it from an error reply.
+- `event_filter::EventFilter<T>`: a `Stream` over the shared event ring that
+  keeps the messages a subscriber asked for: by module (`EventFilter::new`), by
+  module and browsing context (`for_context`) or with any predicate
+  (`with_predicate`). A subscriber that falls behind gets
+  `BidiError::Lagged { skipped }` and keeps working with what it did not miss.
