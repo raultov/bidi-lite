@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- CI: pushing a version tag creates its GitHub release, with that version's
+  CHANGELOG section as notes, once every check passes on the tag's code.
+
 ## [0.1.1] - 2026-10-11
 
 ### Changed
