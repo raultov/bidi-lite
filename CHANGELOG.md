@@ -96,4 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `multi_tab` (several tabs on one session, per-tab listeners, context discovery);
   `multi_tab_parallel` (several pages loading at once over one connection);
   `breakpoints_usage` (BiDi drives the page, the RDP debugger breaks in its
-  script, reads a variable in the paused frame and pauses on an exception).
+  script, reads a variable in the paused frame and pauses on an exception);
+  `proxy_usage` (a per-user-context proxy with credentials answered from
+  `network.authRequired`; skipped unless `PROXY_*` are set).
