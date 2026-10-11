@@ -112,3 +112,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokio-tungstenite 0.30, futures-util 0.3.34, serde 1.0.229, serde_json 1.0.153,
   thiserror 2.0.21, oneshot 0.2 (with its `async` feature, now opt-in) and, for
   the examples, tracing-subscriber 0.3.23.
+
+### Fixed
+- `Debugger::on_thread_state` and `on_sources` no longer drop the first packets
+  of a new target when the debugger's background task has not seen the target
+  switch yet (a pause right after a reload could be lost and the page left
+  paused); `thread_actor()` is then already the new one.
+- The debugger's background task stops when the last clone of the `Debugger` is
+  dropped, instead of living as long as the connection.
+- A failed `Debugger::attach` stops watching the tab's targets.
+- `rdp::resources::locate` counts CR, U+2028 and U+2029 as line breaks, as
+  JavaScript does.

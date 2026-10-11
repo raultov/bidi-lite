@@ -154,6 +154,7 @@ impl RdpClient {
     /// Requests to one actor are answered in order, so a second request waits for
     /// the first. An actor that never answers therefore blocks its own queue: its
     /// later requests time out until the connection is replaced.
+    /// The timeout also counts the time spent queued behind them.
     pub async fn request<P: Serialize>(
         &self,
         to: &str,

@@ -49,6 +49,18 @@ struct State {
 
 type Shared = Arc<RwLock<State>>;
 
+/// The background task, stopped when the last clone of the debugger is dropped.
+///
+/// Without it the task would live as long as the connection, one more for every
+/// debugger attached and dropped on a long-lived `RdpClient`.
+struct Follower(AbortHandle);
+
+impl Drop for Follower {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 // A panic while holding the lock cannot leave `State` half-written in a way that
 // matters (each field is replaced whole), so a poisoned lock is still usable.
 fn read(state: &Shared) -> RwLockReadGuard<'_, State> {
@@ -72,7 +84,7 @@ pub struct Debugger {
     breakpoint_list: String,
     thread_configuration: String,
     state: Shared,
-    follower: AbortHandle,
+    follower: Arc<Follower>,
 }
 
 impl Debugger {
@@ -110,20 +122,17 @@ impl Debugger {
         client
             .request(&watcher, "watchTargets", json!({ "targetType": "frame" }))
             .await?;
-        wait_for_target(&mut events, &watcher, &state, client.default_timeout()).await?;
-        client
-            .request(
-                &watcher,
-                "watchResources",
-                json!({ "resourceTypes": RESOURCE_TYPES }),
-            )
-            .await?;
+        if let Err(error) = watch_resources(client, &watcher, &mut events, &state).await {
+            // Firefox would otherwise go on announcing this tab's targets for nobody.
+            unwatch(client, &watcher);
+            return Err(error);
+        }
         // The reader broadcasts a notification before it routes the reply that
         // follows it, so the bootstrap sources are already queued here.
         drain(&mut events, &watcher, &state);
 
-        let follower =
-            tokio::spawn(follow(events, watcher.clone(), Arc::clone(&state))).abort_handle();
+        let task = tokio::spawn(follow(events, watcher.clone(), Arc::clone(&state)));
+        let follower = Arc::new(Follower(task.abort_handle()));
         Ok(Self {
             client: client.clone(),
             watcher,
@@ -182,6 +191,10 @@ impl Debugger {
     }
 
     /// The thread actor of the current target. It changes on every navigation.
+    ///
+    /// If announcements were missed (see [`Debugger::sources_complete`]) the switch
+    /// to a new target may have been missed too, and this actor may be gone until
+    /// the next navigation.
     pub fn thread_actor(&self) -> String {
         self.target()
             .map(|target| target.thread_actor)
@@ -204,7 +217,8 @@ impl Debugger {
     }
 
     /// `false` if announcements were missed (the event ring lagged), so
-    /// [`Debugger::sources`] may lack some until the next navigation.
+    /// [`Debugger::sources`] may lack some, and the target (thread and console
+    /// actors) may be stale, until the next navigation.
     pub fn sources_complete(&self) -> bool {
         read(&self.state).sources_complete
     }
@@ -392,6 +406,9 @@ impl Debugger {
     }
 
     /// Evaluates `expression` in a paused frame.
+    ///
+    /// The client's timeout applies twice: to the request and then to the
+    /// `evaluationResult` that follows it.
     pub async fn evaluate_on_frame(
         &self,
         frame_actor: &str,
@@ -413,6 +430,8 @@ impl Debugger {
     /// requests are one-way: Firefox does not answer them. A paused thread stays
     /// paused: resume it first. A breakpoint list that is already gone (closed tab)
     /// counts as success.
+    ///
+    /// It detaches every clone: they share the breakpoints and the background task.
     pub async fn detach(self) -> BidiResult<()> {
         let breakpoints = std::mem::take(&mut write(&self.state).breakpoints);
         let mut first_error = None;
@@ -431,18 +450,8 @@ impl Debugger {
             }
         }
 
-        // Best effort: a dead connection has already dropped the watcher.
-        let _ = self.client.send_oneway(
-            &self.watcher,
-            "unwatchResources",
-            json!({ "resourceTypes": RESOURCE_TYPES }),
-        );
-        let _ = self.client.send_oneway(
-            &self.watcher,
-            "unwatchTargets",
-            json!({ "targetType": "frame" }),
-        );
-        self.follower.abort();
+        unwatch(&self.client, &self.watcher);
+        self.follower.0.abort();
         first_error.map_or(Ok(()), Err)
     }
 
@@ -453,7 +462,15 @@ impl Debugger {
     /// Resource packets of `resource_type` from the current target.
     fn on_resource(&self, resource_type: &'static str) -> EventFilter<RdpPacket> {
         let state = Arc::clone(&self.state);
+        let watcher = self.watcher.clone();
         EventFilter::with_predicate(self.client.subscribe(), move |packet| {
+            // The background task may not have seen a target switch yet. The new
+            // target is announced on this stream before its resources, so applying
+            // it here keeps a pause right after a reload from being dropped.
+            if packet.r#type.as_deref() == Some("target-available-form") {
+                apply(packet, &watcher, &state);
+                return false;
+            }
             from_current_target(&state, packet)
                 && !parse_resources(packet, resource_type).is_empty()
         })
@@ -612,8 +629,13 @@ fn apply(packet: &RdpPacket, watcher: &str, state: &Shared) {
     match packet.r#type.as_deref() {
         Some("target-available-form") if packet.from.as_deref() == Some(watcher) => {
             if let Some(target) = top_level_target(&packet.body) {
-                // The sources died with the previous target.
                 let mut state = write(state);
+                // Applied by the background task and by every filter: only once.
+                let known = state.target.as_ref().map(|current| current.actor.as_str());
+                if known == Some(target.actor.as_str()) {
+                    return;
+                }
+                // The sources died with the previous target.
                 state.target = Some(target);
                 state.sources.clear();
                 state.sources_complete = true;
@@ -636,6 +658,27 @@ fn apply(packet: &RdpPacket, watcher: &str, state: &Shared) {
         }
         _ => {}
     }
+}
+
+/// Waits for the first top-level target, then watches the sources and thread states.
+async fn watch_resources(
+    client: &RdpClient,
+    watcher: &str,
+    events: &mut broadcast::Receiver<RdpPacket>,
+    state: &Shared,
+) -> BidiResult<()> {
+    wait_for_target(events, watcher, state, client.default_timeout()).await?;
+    let params = json!({ "resourceTypes": RESOURCE_TYPES });
+    client.request(watcher, "watchResources", params).await?;
+    Ok(())
+}
+
+/// Stops watching resources and targets. Best effort and one-way: Firefox never
+/// answers these, and a dead connection has already dropped the watcher.
+fn unwatch(client: &RdpClient, watcher: &str) {
+    let resources = json!({ "resourceTypes": RESOURCE_TYPES });
+    let _ = client.send_oneway(watcher, "unwatchResources", resources);
+    let _ = client.send_oneway(watcher, "unwatchTargets", json!({ "targetType": "frame" }));
 }
 
 /// Waits for the first top-level target, applying what arrives meanwhile.
@@ -1563,6 +1606,97 @@ mod tests {
         })
         .await;
         assert_eq!(debugger.sources().len(), 2);
+    }
+
+    /// The background task's handle, to stop it or watch it end.
+    fn follower_of(debugger: &Debugger) -> AbortHandle {
+        debugger.follower.0.clone()
+    }
+
+    /// DBG-43: `on_thread_state` follows a target switch by itself.
+    #[tokio::test]
+    async fn on_thread_state_follows_a_target_switch_by_itself() {
+        // Given a filter on the thread states, and a background task that is not
+        // keeping up (stopped here, so only the filter can learn of the switch)
+        let (server, debugger) = attached(vec![]).await;
+        let mut states = debugger.on_thread_state();
+        follower_of(&debugger).abort();
+
+        // When the tab reloads and the new target pauses at once
+        server.push(new_target("T2", "thread2", "console2"));
+        server.push(rdp_reply(
+            "T2",
+            fixture("rdp/resources-thread-state-paused.json"),
+        ));
+
+        // Then the pause of the new target is yielded, not dropped
+        let packet = timeout(WAIT, states.next())
+            .await
+            .expect("the pause must not be dropped")
+            .expect("open")
+            .expect("no lag");
+        assert_eq!(packet.from.as_deref(), Some("T2"));
+        // And resuming it would go to the new thread
+        assert_eq!(debugger.thread_actor(), "thread2");
+    }
+
+    /// DBG-47: A filter applying a target switch the task already applied keeps the sources.
+    #[tokio::test]
+    async fn a_target_switch_is_applied_once() {
+        // Given a filter, and a switch the background task has already applied with its source
+        let (server, debugger) = attached(vec![]).await;
+        let mut states = debugger.on_thread_state();
+        server.push(new_target("T2", "thread2", "console2"));
+        server.push(sources_announced(
+            "T2",
+            json!([{ "actor": "s2", "url": "u" }]),
+        ));
+        eventually("the new source", || {
+            debugger.sources().iter().any(|source| source.actor == "s2")
+        })
+        .await;
+
+        // When the filter reaches the same switch and a pause behind it
+        server.push(rdp_reply(
+            "T2",
+            fixture("rdp/resources-thread-state-paused.json"),
+        ));
+        timeout(WAIT, states.next())
+            .await
+            .expect("a packet")
+            .expect("open")
+            .expect("no lag");
+
+        // Then the source the task cached is still there
+        assert!(debugger.sources().iter().any(|source| source.actor == "s2"));
+    }
+
+    /// DBG-44: Dropping every clone stops the background task.
+    #[tokio::test]
+    async fn dropping_every_clone_stops_the_background_task() {
+        // Given a debugger on a connection that stays open (the leak case)
+        let (_server, debugger) = attached(vec![]).await;
+        let _connection = debugger.client().clone();
+        let follower = follower_of(&debugger);
+        let clone = debugger.clone();
+        drop(debugger);
+        assert!(!follower.is_finished(), "a clone is still alive");
+        drop(clone);
+        eventually("the background task to stop", || follower.is_finished()).await;
+    }
+
+    /// DBG-46: A failed attach stops watching the targets.
+    #[tokio::test]
+    async fn failed_attach_stops_watching_targets() {
+        let silent_targets = vec![(
+            (WATCHER, "watchTargets"),
+            vec![rdp_reply(WATCHER, json!({}))],
+        )];
+        let mut server = MockServer::start_rdp(rdp_firefox_like(silent_targets)).await;
+        let client = client_for(&server, Duration::from_millis(300)).await;
+        let _ = failure(Debugger::attach_selected(&client).await);
+        let unwatch = server.next_command_named("unwatchTargets").await;
+        assert_eq!(unwatch["to"], WATCHER);
     }
 
     /// DBG-36: `on_sources` only yields this target's source announcements.

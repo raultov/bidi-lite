@@ -227,14 +227,37 @@ pub fn locate(source_url: &str, source: &str, needle: &str) -> Option<Breakpoint
     if needle.is_empty() {
         return None;
     }
-    source.lines().enumerate().find_map(|(index, line)| {
-        let offset = line.find(needle)?;
-        Some(BreakpointLocation {
-            source_url: source_url.to_string(),
-            line: u32::try_from(index + 1).ok()?,
-            column: Some(u32::try_from(line[..offset].encode_utf16().count()).ok()?),
+    javascript_lines(source)
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, line)| {
+            let offset = line.find(needle)?;
+            Some(BreakpointLocation {
+                source_url: source_url.to_string(),
+                line: u32::try_from(index + 1).ok()?,
+                column: Some(u32::try_from(line[..offset].encode_utf16().count()).ok()?),
+            })
         })
-    })
+}
+
+/// The lines of `source` as JavaScript counts them: LF, CR, CRLF, U+2028 and
+/// U+2029 all end a line, so the numbers match Firefox's.
+fn javascript_lines(source: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = source.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        if !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+            continue;
+        }
+        lines.push(&source[start..index]);
+        start = index + c.len_utf8();
+        if c == '\r' && chars.next_if(|&(_, next)| next == '\n').is_some() {
+            start += 1;
+        }
+    }
+    lines.push(&source[start..]);
+    lines
 }
 
 #[cfg(test)]
@@ -383,6 +406,21 @@ mod tests {
         // And the column counts UTF-16 units, like JavaScript
         let wide = locate("u", "\u{1F600} x", "x").expect("found");
         assert_eq!(wide.column, Some(3));
+    }
+
+    /// DBG-45: `locate` counts every JavaScript line terminator.
+    #[test]
+    fn locate_counts_every_javascript_line_terminator() {
+        // Then CR, CRLF, LINE SEPARATOR and PARAGRAPH SEPARATOR each end a line
+        for source in [
+            "a\rb\rneedle",
+            "a\r\nb\r\nneedle",
+            "a\u{2028}b\u{2028}needle",
+            "a\u{2029}b\nneedle",
+        ] {
+            let found = locate("u", source, "needle").expect("found");
+            assert_eq!(found.line, 3, "{source:?}");
+        }
     }
 
     /// DBG-19: `BreakpointLocation::from_cdp` converts 0-based lines.
