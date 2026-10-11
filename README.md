@@ -34,7 +34,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bidi-lite = "0.1.0"
+bidi-lite = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
