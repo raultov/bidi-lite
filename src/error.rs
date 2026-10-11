@@ -108,6 +108,15 @@ impl BidiError {
             stacktrace: response.stacktrace.clone(),
         }
     }
+
+    /// The error for a reply that lacks a field the library depends on.
+    ///
+    /// An [`InternalError`](BidiError::InternalError) rather than a protocol
+    /// error: the browser answered successfully, so what is wrong is this
+    /// library's assumption about the reply.
+    pub(crate) fn missing_field(method: &str, field: &str) -> Self {
+        Self::InternalError(format!("{method} returned no `{field}`"))
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +215,19 @@ mod tests {
         let shown = error.to_string();
         assert!(shown.contains("invalid argument"), "got: {shown}");
         assert!(shown.contains("bad url"), "got: {shown}");
+    }
+
+    /// ERR-06: A missing reply field is an internal error naming method and field.
+    #[test]
+    fn missing_field_is_an_internal_error_naming_method_and_field() {
+        // Given a reply to session.new that lacks sessionId
+        let error = BidiError::missing_field("session.new", "sessionId");
+
+        // Then it is an InternalError naming both, with the field quoted
+        let BidiError::InternalError(message) = error else {
+            panic!("expected InternalError, got {error:?}");
+        };
+        assert_eq!(message, "session.new returned no `sessionId`");
     }
 
     /// ERR-05: Timeout Display names the method.

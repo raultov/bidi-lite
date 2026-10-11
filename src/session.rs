@@ -7,9 +7,9 @@
 //!
 //! The items are re-exported from [`crate::client`], where users look for them.
 
-use crate::client::{BidiClient, session_url};
+use crate::client::{BidiClient, EVENT_CHANNEL_CAPACITY, session_url};
 use crate::error::{BidiError, BidiResult, codes};
-use crate::protocol::{NoParams, WsResponse, str_at};
+use crate::protocol::{NoParams, WsResponse};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -70,7 +70,21 @@ impl BidiClient {
         default_timeout: Duration,
         capabilities: Value,
     ) -> BidiResult<Self> {
-        let client = Self::connect(&session_url(host), default_timeout).await?;
+        Self::new_with_capacity(host, default_timeout, EVENT_CHANNEL_CAPACITY, capabilities).await
+    }
+
+    /// Connects with an explicit event-channel capacity and starts a session.
+    ///
+    /// The one place that pairs a connection with its session, shared by
+    /// [`BidiClient::new_with_capabilities`] and `BrowserClient`.
+    pub(crate) async fn new_with_capacity(
+        host: &str,
+        default_timeout: Duration,
+        capacity: usize,
+        capabilities: Value,
+    ) -> BidiResult<Self> {
+        let client =
+            Self::connect_with_capacity(&session_url(host), default_timeout, capacity).await?;
         // If the session cannot start, `client` is dropped on the way out, which
         // closes the socket: a failed attempt leaves no connection behind.
         client.start_session(capabilities).await?;
@@ -82,7 +96,7 @@ impl BidiClient {
         let response = self.send_raw_command("session.status", NoParams).await?;
         let result = response
             .result
-            .ok_or_else(|| missing_field("session.status", "result"))?;
+            .ok_or_else(|| BidiError::missing_field("session.status", "result"))?;
         Ok(serde_json::from_value(result)?)
     }
 
@@ -164,11 +178,9 @@ impl BidiClient {
 
         let response = self.send_raw_command("session.subscribe", params).await?;
         response
-            .result
-            .as_ref()
-            .and_then(|result| str_at(result, &["subscription"]))
+            .result_str("subscription")
             .map(str::to_string)
-            .ok_or_else(|| missing_field("session.subscribe", "subscription"))
+            .ok_or_else(|| BidiError::missing_field("session.subscribe", "subscription"))
     }
 
     /// `session.unsubscribe` for the given subscription ids. No ids is a no-op.
@@ -189,11 +201,6 @@ impl BidiClient {
     }
 }
 
-/// The error for a reply that lacks a field the library depends on.
-fn missing_field(method: &str, field: &str) -> BidiError {
-    BidiError::InternalError(format!("{method} returned no `{field}`"))
-}
-
 /// Gives a refusal to create a session its own variant; anything else passes.
 fn session_not_created(error: BidiError) -> BidiError {
     match error {
@@ -206,11 +213,12 @@ fn session_not_created(error: BidiError) -> BidiError {
 
 /// Reads the session out of a `session.new` reply.
 fn session_info(response: &WsResponse) -> BidiResult<SessionInfo> {
-    let result = response.result.as_ref();
-    let session_id = result
-        .and_then(|result| str_at(result, &["sessionId"]))
-        .ok_or_else(|| missing_field("session.new", "sessionId"))?;
-    let capabilities = result
+    let session_id = response
+        .result_str("sessionId")
+        .ok_or_else(|| BidiError::missing_field("session.new", "sessionId"))?;
+    let capabilities = response
+        .result
+        .as_ref()
         .and_then(|result| result.get("capabilities"))
         .cloned()
         .unwrap_or_default();

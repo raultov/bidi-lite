@@ -68,6 +68,15 @@ impl WsResponse {
         let params = self.params.as_ref()?;
         str_at(params, &["context"]).or_else(|| str_at(params, &["source", "context"]))
     }
+
+    /// The string at `result.{field}` of a command reply, if there is one.
+    ///
+    /// Replies carry the identifiers a client depends on (`sessionId`,
+    /// `subscription`, `context`) as plain strings; this is the one place that
+    /// knows how to read them.
+    pub(crate) fn result_str(&self, field: &str) -> Option<&str> {
+        str_at(self.result.as_ref()?, &[field])
+    }
 }
 
 /// A command as written on the wire.
@@ -272,6 +281,27 @@ mod tests {
 
         // Then deserialization succeeds
         assert!(response.is_ok(), "extension fields must not fail the parse");
+    }
+
+    /// PRO-12: `result_str` reads a string field of the result.
+    #[test]
+    fn result_str_reads_a_string_field_of_the_result() {
+        // Given a reply whose result holds a string, a number and a nested object
+        let response = parse(
+            r#"{"type":"success","id":1,"result":{"context":"C1","n":1,"o":{"context":"X"}}}"#,
+        );
+
+        // Then the string is found
+        assert_eq!(response.result_str("context"), Some("C1"));
+        // And a missing field, a non-string and a nested field are not
+        assert_eq!(response.result_str("missing"), None);
+        assert_eq!(response.result_str("n"), None);
+        assert_eq!(response.result_str("o"), None);
+        // And a reply without a result has no fields
+        assert_eq!(
+            parse(r#"{"type":"success","id":2}"#).result_str("context"),
+            None
+        );
     }
 
     /// PRO-11: `str_at` walks nested objects and returns `None` on any miss.

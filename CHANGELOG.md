@@ -41,3 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection whose session could not start is closed. `SessionInfo`,
   `SessionStatus` and `default_capabilities` (Puppeteer's capabilities) are
   exported from `client`. The session is shared by every clone of the client.
+- `browser::BrowserClient`: browser-level control over one session.
+  `connect` (or `from_client` for a client built with custom capabilities),
+  `list_contexts`, `list_tabs`, `attach`, `attach_to_all_tabs`, `new_tab`,
+  `close_tab`, `set_discover_contexts`, `end` and `close_browser`. `attach`
+  asks the browser first, so an unknown context fails with `no such frame`
+  instead of on the first command; `new_tab` closes the tab it just opened if
+  navigating it fails, so no orphan tab is left behind; `close_browser` counts a
+  dropped socket as success because Firefox may close it before answering.
+  Also `ContextInfo` (tolerant of the fields a browser leaves out) and
+  `ReadinessState`.
+- `tab::Tab`: the handle `BrowserClient` hands out for one top-level browsing
+  context, with `context_id` and `client`. Its navigation helpers come next.
