@@ -52,4 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Also `ContextInfo` (tolerant of the fields a browser leaves out) and
   `ReadinessState`.
 - `tab::Tab`: the handle `BrowserClient` hands out for one top-level browsing
-  context, with `context_id` and `client`. Its navigation helpers come next.
+  context. `send_raw_command` sends exactly what it is given, because BiDi puts
+  the context in a different place per command; the helpers `navigate`,
+  `reload`, `activate`, `close`, `subscribe_events` / `unsubscribe_events` and
+  `script_target` put it where each command expects it. `on_module` and
+  `events` are filters limited to the tab (they need `subscribe_events` first).
+  Also re-exports `ReadinessState`.

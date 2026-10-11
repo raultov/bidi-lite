@@ -3,8 +3,8 @@
 A lightweight, asynchronous, and low-overhead Rust client for **WebDriver BiDi**, focused on Firefox.
 
 *Work in progress: not usable yet. Implemented so far: the BiDi wire types
-(`protocol`), the error type (`error`), event filtering (`event_filter`) and the
+(`protocol`), the error type (`error`), event filtering (`event_filter`), the
 connection with raw command dispatch and session handling
-(`client::BidiClient`) and browser-level control of tabs and contexts
-(`browser::BrowserClient`). Driving a tab (`tab::Tab`) and the Firefox
-debugger are still to come.*
+(`client::BidiClient`), browser-level control of tabs and contexts
+(`browser::BrowserClient`) and driving a single tab (`tab::Tab`). The Firefox
+debugger is still to come.*

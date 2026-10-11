@@ -290,13 +290,34 @@ fn fail_pending_requests(pending: &PendingRequests) {
     }
 }
 
+/// A client whose writer end is under the test's control: no socket involved.
+///
+/// Shared with the tests of the modules built on top of the client.
+#[cfg(test)]
+pub(crate) fn test_client(
+    default_timeout: Duration,
+) -> (BidiClient, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let (command_tx, commands) = tokio::sync::mpsc::unbounded_channel();
+    let client = BidiClient {
+        connection: Connection {
+            command_tx,
+            is_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        },
+        pending_requests: Arc::new(Mutex::new(HashMap::new())),
+        event_tx: broadcast::channel(16).0,
+        next_id: Arc::new(AtomicU64::new(1)),
+        default_timeout,
+        session: SessionSlot::default(),
+    };
+    (client, commands)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::NoParams;
     use crate::test_support::{MockServer, firefox_like, silent, success};
     use serde_json::{Value, json};
-    use std::sync::atomic::AtomicBool;
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
     use tokio_stream::StreamExt;
@@ -305,23 +326,6 @@ mod tests {
 
     type Call = JoinHandle<BidiResult<WsResponse>>;
     type Commands = mpsc::UnboundedReceiver<String>;
-
-    /// A client whose writer end is under the test's control: no socket involved.
-    fn test_client(default_timeout: Duration) -> (BidiClient, Commands) {
-        let (command_tx, commands) = mpsc::unbounded_channel();
-        let client = BidiClient {
-            connection: Connection {
-                command_tx,
-                is_alive: Arc::new(AtomicBool::new(true)),
-            },
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            event_tx: broadcast::channel(16).0,
-            next_id: Arc::new(AtomicU64::new(1)),
-            default_timeout,
-            session: SessionSlot::default(),
-        };
-        (client, commands)
-    }
 
     /// The router of a test client, to feed it frames as the reader task would.
     fn router_of(client: &BidiClient) -> BidiRouter {

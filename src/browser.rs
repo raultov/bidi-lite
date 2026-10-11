@@ -168,29 +168,24 @@ impl BrowserClient {
             .ok_or_else(|| BidiError::missing_field("browsingContext.create", "context"))?
             .to_string();
 
+        let tab = Tab::new(self.client.clone(), context);
         if url != "about:blank" {
-            let params = json!({ "context": context, "url": url, "wait": ReadinessState::None });
-            if let Err(error) = self
-                .client
-                .send_raw_command("browsingContext.navigate", params)
-                .await
-            {
+            if let Err(error) = tab.navigate(url, ReadinessState::None).await {
                 // The navigation error is the one that matters; failing to close
                 // the tab we just opened would only hide it.
-                let _ = self.close_tab(&context).await;
+                let _ = tab.close().await;
                 return Err(error);
             }
         }
 
-        Ok(Tab::new(self.client.clone(), context))
+        Ok(tab)
     }
 
     /// `browsingContext.close {context}`.
     pub async fn close_tab(&self, context: &str) -> BidiResult<()> {
-        self.client
-            .send_raw_command("browsingContext.close", json!({ "context": context }))
-            .await?;
-        Ok(())
+        Tab::new(self.client.clone(), context.to_string())
+            .close()
+            .await
     }
 
     /// Turns on or off the `contextCreated` and `contextDestroyed` events.
