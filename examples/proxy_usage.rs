@@ -107,29 +107,47 @@ async fn browse_through(tab: &Tab, proxy: Proxy) -> BidiResult<()> {
     Ok(())
 }
 
-/// Answers every `network.authRequired` of the tab with the proxy's credentials.
+/// Answers the proxy's authentication challenges (407) with its credentials.
+///
+/// Only those: a 401 comes from the site itself, and sending it the proxy's
+/// credentials would leak them. Other challenges get the browser's default.
 fn spawn_authenticator(tab: &Tab, proxy: Proxy) {
     let tab = tab.clone();
     let mut events = tab.on_module("network");
     tokio::spawn(async move {
-        while let Some(Ok(event)) = events.next().await {
-            if event.method.as_deref() != Some("network.authRequired") {
-                continue;
-            }
-            let request = event.params.unwrap_or_default()["request"]["request"].clone();
-            let answer = json!({
-                "request": request,
-                "action": "provideCredentials",
-                "credentials": { "type": "password", "username": proxy.username, "password": proxy.password },
-            });
-            if let Err(error) = tab
-                .send_raw_command("network.continueWithAuth", answer)
-                .await
-            {
-                warn!("could not answer the proxy: {error}");
+        while let Some(event) = events.next().await {
+            let event = match event {
+                Ok(event) => event,
+                // Some events were missed; keep answering the next ones.
+                Err(error) => {
+                    warn!("network events: {error}");
+                    continue;
+                }
+            };
+            if event.method.as_deref() == Some("network.authRequired") {
+                answer_challenge(&tab, &proxy, event.params.unwrap_or_default()).await;
             }
         }
     });
+}
+
+async fn answer_challenge(tab: &Tab, proxy: &Proxy, params: Value) {
+    let request = params["request"]["request"].clone();
+    let answer = if params["response"]["status"] == 407 {
+        json!({
+            "request": request,
+            "action": "provideCredentials",
+            "credentials": { "type": "password", "username": proxy.username, "password": proxy.password },
+        })
+    } else {
+        json!({ "request": request, "action": "default" })
+    };
+    if let Err(error) = tab
+        .send_raw_command("network.continueWithAuth", answer)
+        .await
+    {
+        warn!("could not answer the challenge: {error}");
+    }
 }
 
 fn string_in(result: Option<Value>, field: &str) -> BidiResult<String> {
