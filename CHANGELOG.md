@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-11
+
 ### Added
 - Project scaffolding: quality gates (`make check`: fmt, clippy, tests, docs,
   duplication), CI on Linux, macOS and Windows, `AGENTS.md`.
