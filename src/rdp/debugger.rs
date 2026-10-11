@@ -137,7 +137,9 @@ impl Debugger {
     /// Attaches to the first tab whose URL starts with `url_prefix`.
     ///
     /// BiDi and RDP name tabs differently (a UUID and an actor), so the URL is
-    /// how a tab driven with BiDi is found here.
+    /// how a tab driven with BiDi is found here. If several tabs show URLs with
+    /// that prefix the first one is taken, which may not be yours: activate your
+    /// tab and use [`Debugger::attach_selected`] instead.
     pub async fn attach_by_url(client: &RdpClient, url_prefix: &str) -> BidiResult<Self> {
         let tabs = client.list_tabs().await?;
         let tab = tabs
@@ -251,7 +253,12 @@ impl Debugger {
             .ok_or_else(|| BidiError::missing_field("substring", "substring"))
     }
 
-    /// The first cached source whose text contains `needle`, and where.
+    /// The first cached source whose text contains `needle`, and its line.
+    ///
+    /// The location has no column, so [`Debugger::set_breakpoint`] breaks at the
+    /// first breakable position of that line: the column where the needle starts
+    /// is rarely one, and Firefox ignores a breakpoint at any other column.
+    /// [`locate`] gives the exact column.
     ///
     /// Texts are fetched one by one; a source whose actor is gone is skipped.
     pub async fn find_in_sources(
@@ -267,7 +274,13 @@ impl Debugger {
                 Err(BidiError::ProtocolError { .. }) => continue,
                 Err(error) => return Err(error),
             };
-            if let Some(location) = locate(&url, &text, needle) {
+            if let Some(found) = locate(&url, &text, needle) {
+                // Where the needle starts is rarely a breakable position, and the
+                // breakpoint list ignores any other column silently.
+                let location = BreakpointLocation {
+                    column: None,
+                    ..found
+                };
                 return Ok(Some((source, location)));
             }
         }
@@ -1375,7 +1388,9 @@ mod tests {
             .expect("searched")
             .expect("found");
         assert_eq!(source.actor, SOURCE);
-        assert_eq!(at, location(PAGE, 3, Some(2)));
+        // The line of the needle, with no column: where the needle starts is not
+        // necessarily a position Firefox can break at.
+        assert_eq!(at, location(PAGE, 3, None));
         assert!(
             debugger
                 .find_in_sources("absent")
