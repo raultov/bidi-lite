@@ -103,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Firefox and checks its output; not part of `make check`.
 - Crate documentation with compiled examples: navigation, events, several tabs,
   raw access and JavaScript debugging.
+- README: quick start, sessions, event subscription and lag, multiple tabs, a
+  cdp-lite equivalence table, four architecture diagrams, the RDP debugger with
+  its limitations, quality gates and examples.
 
 ### Changed
 - Dependencies updated to their latest releases: tokio 1.53, tokio-stream 0.1.19,
