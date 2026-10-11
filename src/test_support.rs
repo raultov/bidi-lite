@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot as tokio_oneshot};
@@ -430,6 +431,57 @@ pub(crate) fn fixture_for(name: &str, command: &Value) -> Value {
     let mut reply = fixture(name);
     reply["id"] = command["id"].clone();
     reply
+}
+
+/// Everything the crate logs, at every level, from the moment of capture.
+///
+/// One subscriber is installed for the whole test binary. A per-thread one would
+/// miss log lines whose interest `tracing` cached as disabled while another test
+/// ran without a subscriber, and a test checking that a secret is *not* logged
+/// would then pass without checking anything. Tests run in parallel, so the text
+/// also holds other tests' lines; look for values only your test uses.
+pub(crate) struct CapturedLogs {
+    start: usize,
+}
+
+impl CapturedLogs {
+    /// What was logged since the capture started.
+    pub(crate) fn text(&self) -> String {
+        let buffer = LOGS.lock().unwrap_or_else(PoisonError::into_inner);
+        String::from_utf8_lossy(&buffer[self.start..]).into_owned()
+    }
+}
+
+static LOGS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// Starts capturing the crate's logs.
+pub(crate) fn capture_logs() -> CapturedLogs {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(|| LogWriter)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other global subscriber in the tests");
+    });
+    let start = LOGS.lock().unwrap_or_else(PoisonError::into_inner).len();
+    CapturedLogs { start }
+}
+
+struct LogWriter;
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut buffer = LOGS.lock().unwrap_or_else(PoisonError::into_inner);
+        buffer.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Never answers anything: for timeouts and for tests that script replies by hand.

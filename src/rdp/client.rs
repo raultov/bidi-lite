@@ -162,6 +162,7 @@ impl RdpClient {
         params: P,
     ) -> BidiResult<RdpPacket> {
         let payload = encode_request(to, method, params)?;
+        debug!("Sending {method} to {to}");
         let reply = self.enqueue(to, payload)?;
 
         match timeout(self.default_timeout, reply).await {
@@ -188,6 +189,7 @@ impl RdpClient {
     /// requests still queued for the same actor.
     pub fn send_oneway<P: Serialize>(&self, to: &str, method: &str, params: P) -> BidiResult<()> {
         let payload = encode_request(to, method, params)?;
+        debug!("Sending {method} to {to}");
         if !self.is_connected() {
             return Err(BidiError::Disconnected);
         }
@@ -338,7 +340,10 @@ impl Router for RdpRouter {
         let packet = match RdpPacket::parse(text) {
             Ok(packet) => packet,
             Err(error) => {
-                debug!("Discarded unparsable RDP message: {error}: {text}");
+                debug!(
+                    "Discarded an unparsable RDP message of {} bytes: {error}",
+                    text.len()
+                );
                 return;
             }
         };
@@ -431,7 +436,7 @@ fn promote_next(queue: &mut ActorQueue, writer: &WeakWriter) {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockOptions, MockServer, fixture, rdp_firefox_like, rdp_reply, silent,
+        MockOptions, MockServer, capture_logs, fixture, rdp_firefox_like, rdp_reply, silent,
     };
     use serde_json::json;
     use tokio::task::JoinHandle;
@@ -904,6 +909,41 @@ mod tests {
 
         // Then it fails at once
         assert!(matches!(result, Err(BidiError::Disconnected)), "{result:?}");
+    }
+
+    /// RDP-26: Logs never carry what a request or a packet contains.
+    #[tokio::test]
+    async fn rdp_logs_never_carry_payloads() {
+        let logs = capture_logs();
+        let server = MockServer::start_rdp(rdp_firefox_like(vec![])).await;
+        let client = connected(&server).await;
+
+        // When a request carries a secret, and the server sends packets that do too
+        let secret = json!({ "text": "s3cr3t-value" });
+        client
+            .request("console1", "evaluateJSAsync", secret)
+            .await
+            .expect("a reply");
+        client
+            .send_oneway("watcher1", "unwatchTargets", json!({ "s": "s3cr3t-value" }))
+            .expect("sent");
+        server.push_raw("garbage s3cr3t-value");
+        server.push(rdp_reply(
+            "console1",
+            json!({ "type": "evaluationResult", "result": "s3cr3t-value" }),
+        ));
+        client
+            .request("root", "listTabs", NoParams)
+            .await
+            .expect("a reply");
+
+        // Then the method is logged, but no content
+        let text = logs.text();
+        assert!(text.contains("evaluateJSAsync"), "{text}");
+        assert!(
+            !text.contains("s3cr3t"),
+            "a payload reached the logs:\n{text}"
+        );
     }
 
     /// RDP-21: Dropping every client closes the socket.

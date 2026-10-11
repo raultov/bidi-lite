@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 pub(crate) type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -174,7 +174,8 @@ async fn write_commands(
     mut command_rx: mpsc::UnboundedReceiver<String>,
 ) {
     while let Some(payload) = command_rx.recv().await {
-        debug!("About to send command {payload}");
+        // Never the content: commands can carry credentials or page data.
+        trace!("Writing a {}-byte frame", payload.len());
         if let Err(error) = sink.send(Message::Text(payload.into())).await {
             error!("Fatal error in the WebSocket writer task: {error}");
             return;

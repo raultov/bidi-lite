@@ -114,4 +114,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session.new` that times out is followed by `session.end`, so a session
   Firefox created anyway does not block it; `BrowserClient::end` resets context
   discovery so it can be turned on again in a new session.
+- Logs never contain what a command or a message carries, so credentials and
+  page data stay out of them at every level: commands are logged as id and
+  method (RDP: type and actor), messages that cannot be routed by type and size.
+- A command whose caller is cancelled (an outer timeout, `select!`, an aborted
+  task) does not leave its id waiting for a reply.
 - Requires Rust 1.98.

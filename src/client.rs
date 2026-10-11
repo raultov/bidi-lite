@@ -141,14 +141,17 @@ impl BidiClient {
             params,
         };
         let payload = serde_json::to_string(&command)?;
+        debug!("Sending command {id}: {method}");
 
         let reply = self.register_pending(id)?;
-        if let Err(error) = transport::send(&self.connection, payload) {
-            self.forget(id);
-            return Err(error);
-        }
-
-        self.await_reply(id, method, reply).await
+        // Removes the id however this ends: reply, timeout, error, or the caller's
+        // future being dropped, which no code after an `.await` would see.
+        let _registered = Registration {
+            pending: &self.pending_requests,
+            id,
+        };
+        transport::send(&self.connection, payload)?;
+        self.await_reply(method, reply).await
     }
 
     /// Whether the reader task still sees an open socket.
@@ -172,16 +175,8 @@ impl BidiClient {
         Ok(reply)
     }
 
-    /// Drops the entry of a command that will never be answered.
-    fn forget(&self, id: u64) {
-        if let Ok(mut pending) = self.pending_requests.lock() {
-            pending.remove(&id);
-        }
-    }
-
     async fn await_reply(
         &self,
-        id: u64,
         method: &str,
         reply: oneshot::Receiver<WsResponse>,
     ) -> BidiResult<WsResponse> {
@@ -189,13 +184,26 @@ impl BidiClient {
             Ok(Ok(response)) => into_result(response),
             // The responder was dropped: the connection went away while waiting.
             Ok(Err(_)) => Err(BidiError::Disconnected),
-            Err(_) => {
-                self.forget(id);
-                Err(BidiError::Timeout {
-                    method: method.to_string(),
-                    timeout: self.default_timeout,
-                })
-            }
+            Err(_) => Err(BidiError::Timeout {
+                method: method.to_string(),
+                timeout: self.default_timeout,
+            }),
+        }
+    }
+}
+
+/// The pending entry of one command, removed when the command is done with.
+///
+/// After a reply the router has already removed it, so this is a no-op then.
+struct Registration<'a> {
+    pending: &'a PendingRequests,
+    id: u64,
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
         }
     }
 }
@@ -230,7 +238,10 @@ impl Router for BidiRouter {
         let response = match serde_json::from_str::<WsResponse>(text) {
             Ok(response) => response,
             Err(error) => {
-                debug!("Discarded unparsable BiDi message: {error}: {text}");
+                debug!(
+                    "Discarded an unparsable BiDi message of {} bytes: {error}",
+                    text.len()
+                );
                 return;
             }
         };
@@ -262,9 +273,13 @@ fn route_message(
         // No subscriber at the moment is fine: the event is simply not wanted.
         let _ = event_tx.send(response);
     } else if response.is_error() {
-        debug!("BiDi error not tied to any command: {raw}");
+        debug!("BiDi error not tied to any command: {:?}", response.error);
     } else {
-        debug!("Unexpected BiDi message: {raw}");
+        debug!(
+            "Unexpected BiDi message of type {:?} ({} bytes)",
+            response.r#type,
+            raw.len()
+        );
     }
 
     Ok(())
@@ -315,7 +330,7 @@ pub(crate) fn test_client(
 mod tests {
     use super::*;
     use crate::protocol::NoParams;
-    use crate::test_support::{MockServer, firefox_like, silent, success};
+    use crate::test_support::{MockServer, capture_logs, firefox_like, silent, success};
     use serde_json::{Value, json};
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
@@ -748,6 +763,57 @@ mod tests {
             let response = finish(call).await.expect("a reply");
             assert_eq!(response.result.expect("a result")["method"], method);
         }
+    }
+
+    /// LOG-01: Logs never carry what a command or a message contains.
+    #[tokio::test]
+    async fn logs_never_carry_payloads() {
+        // Given every log line of this test, at every level
+        let logs = capture_logs();
+        let server = MockServer::start(firefox_like(vec![])).await;
+        let client = BidiClient::connect(&server.ws_url(), WAIT)
+            .await
+            .expect("connect");
+
+        // When a command carries a secret, and the browser sends messages that do too
+        let secret = json!({ "credentials": { "type": "password", "password": "s3cr3t-value" } });
+        client
+            .send_raw_command("network.continueWithAuth", secret)
+            .await
+            .expect("a reply");
+        server.push_raw("not json s3cr3t-value");
+        server.push(json!({ "type": "unknown", "secret": "s3cr3t-value" }));
+        server.push(json!({ "type": "error", "id": null, "error": "invalid argument", "message": "s3cr3t-value" }));
+        // (a later round trip guarantees the reader has handled all of them)
+        client
+            .send_raw_command("session.status", NoParams)
+            .await
+            .expect("a reply");
+
+        // Then the method is still logged, but nothing the messages contain is
+        let text = logs.text();
+        assert!(text.contains("network.continueWithAuth"), "{text}");
+        assert!(
+            !text.contains("s3cr3t"),
+            "a payload reached the logs:\n{text}"
+        );
+    }
+
+    /// CLI-23: A command whose caller is cancelled leaves no pending entry.
+    #[tokio::test]
+    async fn cancelled_command_leaves_no_pending_entry() {
+        // Given a command on the wire that nobody answers
+        let (client, mut commands) = test_client(WAIT);
+        let pending = call(&client, "session.status", NoParams);
+        next_payload(&mut commands).await;
+        assert_eq!(pending_len(&client), 1);
+
+        // When its caller is cancelled (an outer timeout, a select!, an abort)
+        pending.abort();
+        let _ = pending.await;
+
+        // Then its id is not kept waiting for a reply that may never come
+        assert_eq!(pending_len(&client), 0);
     }
 
     /// CLI-22: No command is registered on a connection that is already gone.
