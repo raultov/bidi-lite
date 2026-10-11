@@ -91,4 +91,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `simple` (start a session, navigate, end it); `filter_domains` (subscribe to
   events, then filter them by module); `runtime_usage` (`script.evaluate`,
   promises, `script.callFunction`, exceptions versus protocol errors, console);
-  `multi_tab` (several tabs on one session, per-tab listeners, context discovery).
+  `multi_tab` (several tabs on one session, per-tab listeners, context discovery);
+  `multi_tab_parallel` (several pages loading at once over one connection).
