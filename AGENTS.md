@@ -105,7 +105,7 @@ src/
 examples/             one runnable program per cdp-lite example; need a real Firefox
 tests/
 ├── fixtures/         real BiDi/RDP messages captured from Firefox (loaded by unit tests)
-├── firefox.sh        start/stop a dedicated headless Firefox for the smoke run
+├── firefox.sh        start/stop a dedicated, visible (not headless) Firefox for the smoke run
 └── run_all_e2e.sh    runs every example against it (`make e2e`, not a gate)
 ```
 
@@ -125,7 +125,7 @@ parameterised helper instead of duplicating code.
 ## Running Firefox for the examples
 
 ```sh
-tests/firefox.sh start   # headless, BiDi on :9222/session, RDP on ws:6000
+tests/firefox.sh start   # visible window (never headless), BiDi on :9222/session, RDP on ws:6000
 cargo run --example simple
 tests/firefox.sh stop
 ```

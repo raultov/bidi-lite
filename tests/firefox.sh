@@ -59,9 +59,8 @@ EOF
   local firefox_bin
   firefox_bin=$(command -v firefox || echo "/usr/bin/firefox")
 
-  echo "Starting Firefox with BiDi on :$BIDI_PORT and RDP on ws:$RDP_PORT..."
+  echo "Starting Firefox (visible window, not headless) with BiDi on :$BIDI_PORT and RDP on ws:$RDP_PORT..."
   "$firefox_bin" \
-    --headless \
     --no-remote \
     --profile "$PROFILE_DIR" \
     --remote-debugging-port="$BIDI_PORT" \
