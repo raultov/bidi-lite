@@ -123,3 +123,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed `Debugger::attach` stops watching the tab's targets.
 - `rdp::resources::locate` counts CR, U+2028 and U+2029 as line breaks, as
   JavaScript does.
+- `BidiClient::end_session` and `BrowserClient::close_browser` return
+  `Disconnected` when the connection was already gone, instead of reporting
+  success for a command that was never sent (the session stays reported).
+- A command sent while the connection is closing fails with `Disconnected`
+  instead of waiting for its whole timeout.
+- A `session.new` that times out is followed by `session.end`, so a session
+  Firefox created anyway does not block it until restarted.
+- `BrowserClient::end` resets context discovery, so it can be turned on again in
+  a new session.
+- The `proxy_usage` example only sends the proxy's credentials to proxy
+  challenges (407), never to a site asking for its own (401), and keeps
+  answering after missed events.

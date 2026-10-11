@@ -7,7 +7,7 @@
 
 use crate::client::{BidiClient, default_capabilities};
 use crate::error::{BidiError, BidiResult};
-use crate::protocol::{NoParams, WsResponse};
+use crate::protocol::WsResponse;
 use crate::tab::Tab;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -211,20 +211,16 @@ impl BrowserClient {
 
     /// `session.end`. The browser stays open.
     pub async fn end(&self) -> BidiResult<()> {
-        self.client.end_session().await
+        self.client.end_session().await?;
+        // The discovery subscription ended with the session.
+        *self.discovery.lock().await = None;
+        Ok(())
     }
 
     /// `browser.close`. The browser may drop the socket before answering, which
     /// counts as success.
     pub async fn close_browser(&self) -> BidiResult<()> {
-        match self
-            .client
-            .send_raw_command("browser.close", NoParams)
-            .await
-        {
-            Ok(_) | Err(BidiError::Disconnected) => Ok(()),
-            Err(error) => Err(error),
-        }
+        self.client.send_closing_command("browser.close").await
     }
 
     /// `browsingContext.getTree` with `params`, parsed.
@@ -302,6 +298,46 @@ mod tests {
 
         // Then its client holds a session
         assert_eq!(browser.client().session_id().as_deref(), Some("S-1"));
+    }
+
+    /// BRW-23: `close_browser` on a connection that is already gone reports it.
+    #[tokio::test]
+    async fn close_browser_on_a_dead_connection_is_an_error() {
+        let mut server = MockServer::start(firefox_like(vec![])).await;
+        let browser = browser(&mut server).await;
+        server.close();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while browser.client().is_connected() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the connection did not end"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let result = browser.close_browser().await;
+        assert!(matches!(result, Err(BidiError::Disconnected)), "{result:?}");
+    }
+
+    /// BRW-24: Context discovery can be turned on again after `end`.
+    #[tokio::test]
+    async fn discovery_can_be_turned_on_again_after_end() {
+        // Given discovery turned on, then the session ended and a new one started
+        let mut server = MockServer::start(firefox_like(vec![])).await;
+        let browser = browser(&mut server).await;
+        browser.set_discover_contexts(true).await.expect("on");
+        server.next_command_named("session.subscribe").await;
+        browser.end().await.expect("ended");
+        browser
+            .client()
+            .start_session(default_capabilities())
+            .await
+            .expect("a new session");
+
+        // When discovery is turned on in the new session
+        browser.set_discover_contexts(true).await.expect("on again");
+
+        // Then it subscribes again: the old subscription ended with its session
+        server.next_command_named("session.subscribe").await;
     }
 
     /// BRW-22: `connect_with_capacity` also starts the session.

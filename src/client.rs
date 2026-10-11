@@ -158,10 +158,17 @@ impl BidiClient {
 
     fn register_pending(&self, id: u64) -> BidiResult<oneshot::Receiver<WsResponse>> {
         let (responder, reply) = oneshot::channel();
-        self.pending_requests
+        let mut pending = self
+            .pending_requests
             .lock()
-            .map_err(|_| BidiError::poisoned_lock("pending-requests"))?
-            .insert(id, responder);
+            .map_err(|_| BidiError::poisoned_lock("pending-requests"))?;
+        // Checked under the lock. The reader clears the flag *before* it takes this
+        // lock to fail every request, so an id added after that is turned away here
+        // and one added before it is failed there: either way the caller hears of it.
+        if !self.is_connected() {
+            return Err(BidiError::Disconnected);
+        }
+        pending.insert(id, responder);
         Ok(reply)
     }
 
@@ -741,6 +748,21 @@ mod tests {
             let response = finish(call).await.expect("a reply");
             assert_eq!(response.result.expect("a result")["method"], method);
         }
+    }
+
+    /// CLI-22: No command is registered on a connection that is already gone.
+    #[test]
+    fn nothing_is_registered_on_a_dead_connection() {
+        // Given a connection the reader has just marked dead (and cleared)
+        let (client, _commands) = test_client(WAIT);
+        client.connection.is_alive.store(false, Ordering::SeqCst);
+
+        // When a command tries to register its id
+        let result = client.register_pending(7);
+
+        // Then it is refused, so it cannot wait for a reply that will never come
+        assert!(matches!(result, Err(BidiError::Disconnected)));
+        assert_eq!(pending_len(&client), 0);
     }
 
     /// CLI-21: A command that cannot be serialized leaves no pending entry.

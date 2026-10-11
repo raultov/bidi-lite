@@ -117,10 +117,17 @@ impl BidiClient {
             return Err(BidiError::SessionNotCreated(status.message));
         }
 
-        let response = self
-            .send_raw_command("session.new", json!({ "capabilities": capabilities }))
-            .await
-            .map_err(session_not_created)?;
+        let params = json!({ "capabilities": capabilities });
+        let response = match self.send_raw_command("session.new", params).await {
+            Ok(response) => response,
+            Err(error @ BidiError::Timeout { .. }) => {
+                // Firefox may have created it anyway, and an open session nobody holds
+                // makes it refuse every new one until it restarts.
+                let _ = self.send_raw_command("session.end", NoParams).await;
+                return Err(error);
+            }
+            Err(error) => return Err(session_not_created(error)),
+        };
         let info = session_info(&response)?;
         self.store_session(Some(info.clone()));
         Ok(info)
@@ -132,12 +139,22 @@ impl BidiClient {
     /// Call it when you are done: dropping the client leaves the session open,
     /// and Firefox allows only one. See [`BidiClient`].
     pub async fn end_session(&self) -> BidiResult<()> {
-        match self.send_raw_command("session.end", NoParams).await {
-            Ok(_) | Err(BidiError::Disconnected) => {
-                self.store_session(None);
-                Ok(())
-            }
-            // The session may still be open: keep reporting it.
+        // On any error the session may still be open: keep reporting it.
+        self.send_closing_command("session.end").await?;
+        self.store_session(None);
+        Ok(())
+    }
+
+    /// Sends a command after which Firefox may close the socket before answering.
+    ///
+    /// A connection lost while waiting counts as success, but one that was already
+    /// gone does not: then nothing was sent.
+    pub(crate) async fn send_closing_command(&self, method: &str) -> BidiResult<()> {
+        if !self.is_connected() {
+            return Err(BidiError::Disconnected);
+        }
+        match self.send_raw_command(method, NoParams).await {
+            Ok(_) | Err(BidiError::Disconnected) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -474,6 +491,46 @@ mod tests {
         // Then it still succeeds and the session is cleared
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(client.session_id(), None);
+    }
+
+    /// SES-22: `end_session` on a connection that is already gone reports it.
+    #[tokio::test]
+    async fn end_session_on_a_dead_connection_is_an_error() {
+        // Given a client with a session whose connection is gone
+        let mut server = MockServer::start(firefox_like(vec![])).await;
+        let client = session_client(&mut server).await;
+        server.close();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while client.is_connected() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the connection did not end"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // When the session is ended
+        let result = client.end_session().await;
+
+        // Then nothing was sent, so the session may still be open in Firefox
+        assert!(matches!(result, Err(BidiError::Disconnected)), "{result:?}");
+        assert_eq!(client.session_id().as_deref(), Some("S-1"));
+    }
+
+    /// SES-23: A `session.new` that times out is followed by `session.end`.
+    #[tokio::test]
+    async fn timed_out_session_new_is_ended() {
+        // Given a Firefox that never answers session.new
+        let handler = answering(firefox_like(vec![]), "session.new", |_| vec![]);
+        let mut server = MockServer::start(handler).await;
+
+        // When a session is started with a short timeout
+        let result = BidiClient::new(&server.host(), Duration::from_millis(300)).await;
+
+        // Then it times out
+        assert!(matches!(result, Err(BidiError::Timeout { .. })));
+        // And the session Firefox may have created anyway is ended, or it would block Firefox
+        server.next_command_named("session.end").await;
     }
 
     /// SES-21: A `session.end` error other than a lost connection keeps the session.
