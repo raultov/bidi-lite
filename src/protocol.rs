@@ -123,6 +123,7 @@ mod tests {
     use serde_json::json;
 
     const EVENT_LOAD: &str = include_str!("../tests/fixtures/bidi/event-load.json");
+    const EVENT_LOG_ENTRY: &str = include_str!("../tests/fixtures/bidi/event-log-entry.json");
 
     fn parse(raw: &str) -> WsResponse {
         serde_json::from_str(raw).expect("message should deserialize")
@@ -246,6 +247,24 @@ mod tests {
 
         // Then the context is C1
         assert_eq!(response.event_context(), Some("C1"));
+    }
+
+    /// PRO-13: A real `log.entryAdded` from Firefox carries its context in `params.source`.
+    #[test]
+    fn event_context_reads_source_context_of_a_real_log_entry() {
+        // Given a log.entryAdded captured from Firefox 157
+        let response = parse(EVENT_LOG_ENTRY);
+
+        // Then it is an event of its own method, with no context at the top of params
+        assert!(response.is_event());
+        assert_eq!(response.method.as_deref(), Some("log.entryAdded"));
+        let params = response.params.as_ref().expect("params");
+        assert!(params.get("context").is_none());
+        // And its context is the one under `source`, the fallback PRO-08 relies on
+        assert_eq!(
+            response.event_context(),
+            Some("8e4fe77d-7af3-4439-aff1-6b8884fdb84b")
+        );
     }
 
     /// PRO-08: The context of an event falls back to `params.source.context`.
