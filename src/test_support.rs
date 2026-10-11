@@ -43,15 +43,23 @@ pub(crate) struct MockOptions {
 pub(crate) struct MockServer {
     addr: SocketAddr,
     commands: mpsc::UnboundedReceiver<Value>,
-    pushes: mpsc::UnboundedSender<String>,
+    control: mpsc::UnboundedSender<Control>,
     path: tokio_oneshot::Receiver<String>,
+}
+
+/// What the test can ask the server to do once the client is connected.
+enum Control {
+    /// Send this raw text frame (so malformed JSON can be injected too).
+    Push(String),
+    /// Close the WebSocket, as a browser that dies or ends the session would.
+    Close,
 }
 
 /// Everything the server task owns.
 struct Plumbing {
     handler: Handler,
     commands: mpsc::UnboundedSender<Value>,
-    pushes: mpsc::UnboundedReceiver<String>,
+    control: mpsc::UnboundedReceiver<Control>,
     greeting: Option<Value>,
 }
 
@@ -70,12 +78,12 @@ impl MockServer {
             .local_addr()
             .expect("a bound listener has an address");
         let (commands_tx, commands) = mpsc::unbounded_channel();
-        let (pushes, pushes_rx) = mpsc::unbounded_channel();
+        let (control, control_rx) = mpsc::unbounded_channel();
         let (path_tx, path) = tokio_oneshot::channel();
         let plumbing = Plumbing {
             handler,
             commands: commands_tx,
-            pushes: pushes_rx,
+            control: control_rx,
             greeting: options.greeting,
         };
 
@@ -84,7 +92,7 @@ impl MockServer {
         Self {
             addr,
             commands,
-            pushes,
+            control,
             path,
         }
     }
@@ -125,8 +133,22 @@ impl MockServer {
 
     /// Sends an arbitrary message to the client at any time.
     pub(crate) fn push(&self, message: Value) {
-        self.pushes
-            .send(message.to_string())
+        self.push_raw(&message.to_string());
+    }
+
+    /// Sends arbitrary text to the client, valid JSON or not.
+    pub(crate) fn push_raw(&self, text: &str) {
+        self.send_control(Control::Push(text.to_string()));
+    }
+
+    /// Closes the WebSocket from the server side.
+    pub(crate) fn close(&self) {
+        self.send_control(Control::Close);
+    }
+
+    fn send_control(&self, control: Control) {
+        self.control
+            .send(control)
             .expect("the mock server task ended");
     }
 }
@@ -154,7 +176,7 @@ async fn serve(
     loop {
         let keep_going = tokio::select! {
             frame = source.next() => on_frame(frame, &plumbing, &mut sink).await,
-            push = plumbing.pushes.recv() => on_push(push, &mut sink).await,
+            control = plumbing.control.recv() => on_control(control, &mut sink).await,
         };
         if !keep_going {
             break;
@@ -209,10 +231,15 @@ async fn relay(plumbing: &Plumbing, text: &str, sink: &mut MockSink) -> bool {
     true
 }
 
-/// Forwards a test-injected message. `None` means the test dropped the handle.
-async fn on_push(push: Option<String>, sink: &mut MockSink) -> bool {
-    match push {
-        Some(text) => sink.send(Message::Text(text.into())).await.is_ok(),
+/// Carries out a test request. `None` means the test dropped the handle.
+async fn on_control(control: Option<Control>, sink: &mut MockSink) -> bool {
+    match control {
+        Some(Control::Push(text)) => sink.send(Message::Text(text.into())).await.is_ok(),
+        Some(Control::Close) => {
+            // The peer may already be gone; either way the server is done.
+            let _ = sink.close().await;
+            false
+        }
         None => false,
     }
 }
@@ -319,6 +346,11 @@ pub(crate) fn fixture(name: &str) -> Value {
     };
     serde_json::from_str(raw)
         .unwrap_or_else(|error| panic!("fixture {name} is not valid JSON: {error}"))
+}
+
+/// Never answers anything: for timeouts and for tests that script replies by hand.
+pub(crate) fn silent() -> Handler {
+    Box::new(|_| Vec::new())
 }
 
 /// Answers like a Firefox with an idle session; per-method result overrides.
