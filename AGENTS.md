@@ -20,9 +20,11 @@ top of `cdp-lite` and `bidi-lite`.
 
 ## Ground rules
 
-1. **Write only inside this repository** (plus the E2E home
-   `~/.local/share/bidi-lite/`, used by `tests/firefox.sh` for the dedicated
-   Firefox profile). Never write into `../cdp-lite`, `../knot-lite` or any other
+1. **Write only inside this repository** (plus the E2E home used by
+   `tests/firefox.sh` for the dedicated Firefox profile:
+   `~/snap/firefox/common/bidi-lite/` with snap Firefox,
+   `~/.local/share/bidi-lite/e2e/` otherwise, or `$BIDI_LITE_E2E_HOME`).
+   Never write into `../cdp-lite`, `../knot-lite` or any other
    checkout; read them freely as references.
 2. **Rust:** edition 2024; **no `unsafe`** (denied in `Cargo.toml`); **no
    `#[allow]`** (`allow_attributes` is a warning and warnings are errors);
