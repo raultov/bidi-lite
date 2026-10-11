@@ -47,6 +47,10 @@ start_firefox() {
   fi
 
   mkdir -p "$PROFILE_DIR"
+  # --start-debugger-server refuses to start unless both remote-enabled and
+  # chrome.enabled are true (checked on Firefox 157). Together with
+  # prompt-connection=false they let any local process drive the browser
+  # through port 6000: this profile is for tests only.
   cat <<'EOF' > "$PROFILE_DIR/user.js"
 user_pref("devtools.debugger.remote-enabled", true);
 user_pref("devtools.chrome.enabled", true);

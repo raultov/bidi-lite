@@ -275,9 +275,12 @@ user_pref("devtools.chrome.enabled", true);
 user_pref("devtools.debugger.prompt-connection", false);
 ```
 
-> **Security:** `prompt-connection=false` lets any local process connect to the
-> debugger port without asking. Use it only with a dedicated profile and with the
-> server on `127.0.0.1`.
+Firefox refuses to start the DevTools server unless the first two are `true`.
+
+> **Security:** with these preferences any local process can connect to the
+> debugger port without being asked, with the debugger's full power over the
+> browser. Use them only with a dedicated profile and with the server on
+> `127.0.0.1`.
 
 ```rust
 let rdp = RdpClient::connect("127.0.0.1:6000", Duration::from_secs(10)).await?;
