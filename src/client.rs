@@ -7,6 +7,7 @@
 use crate::error::{BidiError, BidiResult};
 use crate::event_filter::EventFilter;
 use crate::protocol::{WsCommand, WsResponse};
+use crate::session::SessionSlot;
 use crate::transport::{self, Connection, Router};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -16,6 +17,8 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 use tracing::{debug, trace};
+
+pub use crate::session::{SessionInfo, SessionStatus, default_capabilities};
 
 /// Capacity of the event broadcast ring of a single connection.
 ///
@@ -46,6 +49,9 @@ pub struct BidiClient {
     event_tx: broadcast::Sender<WsResponse>,
     next_id: Arc<AtomicU64>,
     default_timeout: Duration,
+    /// The session this connection holds, shared by every clone. Read and
+    /// written by the session layer (`session.rs`).
+    pub(crate) session: SessionSlot,
 }
 
 impl BidiClient {
@@ -83,6 +89,7 @@ impl BidiClient {
             event_tx,
             next_id: Arc::new(AtomicU64::new(1)),
             default_timeout,
+            session: SessionSlot::default(),
         })
     }
 
@@ -311,6 +318,7 @@ mod tests {
             event_tx: broadcast::channel(16).0,
             next_id: Arc::new(AtomicU64::new(1)),
             default_timeout,
+            session: SessionSlot::default(),
         };
         (client, commands)
     }

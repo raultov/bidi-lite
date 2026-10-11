@@ -31,5 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `on_module_for_context`; a frame that is not valid JSON is logged and
   dropped without closing the connection. Also `session_url` and
   `EVENT_CHANNEL_CAPACITY`. The socket is closed when the last clone of the
-  client is dropped, so a Firefox session cannot outlive its client. No session
-  is created yet: that is the next step.
+  client is dropped, so a Firefox session cannot outlive its client.
+- Session layer on `BidiClient`: `new` and `new_with_capabilities` connect and
+  start a session in one call, `start_session`, `end_session`, `status`,
+  `session` and `session_id` manage it, and `subscribe_events` /
+  `unsubscribe_events` turn on the events that `on_module` filters. Firefox
+  allows a single session, so a busy browser is reported as
+  `BidiError::SessionNotCreated` carrying the browser's own explanation, and a
+  connection whose session could not start is closed. `SessionInfo`,
+  `SessionStatus` and `default_capabilities` (Puppeteer's capabilities) are
+  exported from `client`. The session is shared by every clone of the client.

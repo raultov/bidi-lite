@@ -123,6 +123,28 @@ impl MockServer {
             .expect("the mock server task ended")
     }
 
+    /// Next command whose `method` equals `method`, skipping the others.
+    ///
+    /// BiDi only: RDP requests carry `type` instead, which lands with the RDP client.
+    pub(crate) async fn next_command_named(&mut self, method: &str) -> Value {
+        loop {
+            let command = self.next_command().await;
+            if command["method"].as_str() == Some(method) {
+                return command;
+            }
+        }
+    }
+
+    /// Asserts that no command arrives within `wait`.
+    ///
+    /// Panics with `unexpected command` otherwise, so a test cannot pass by
+    /// not waiting long enough for a command it believes was never sent.
+    pub(crate) async fn assert_no_command(&mut self, wait: Duration) {
+        if let Ok(Some(command)) = timeout(wait, self.commands.recv()).await {
+            panic!("unexpected command reached the mock: {command}");
+        }
+    }
+
     /// Path requested in the WebSocket handshake. Resolves once per server.
     pub(crate) async fn handshake_path(&mut self) -> String {
         timeout(WAIT, &mut self.path)
@@ -224,6 +246,11 @@ async fn relay(plumbing: &Plumbing, text: &str, sink: &mut MockSink) -> bool {
     let _ = plumbing.commands.send(command.clone());
 
     for reply in (plumbing.handler)(&command) {
+        if reply == close_marker() {
+            // The peer may already be gone; either way the server is done.
+            let _ = sink.close().await;
+            return false;
+        }
         if send_json(sink, &reply).await.is_err() {
             return false;
         }
@@ -251,6 +278,19 @@ async fn send_json(sink: &mut MockSink, value: &Value) -> Result<(), WsError> {
 /// `{"type":"success","id":..,"result":..}`
 pub(crate) fn success(id: &Value, result: Value) -> Value {
     json!({ "type": "success", "id": id, "result": result })
+}
+
+/// `{"type":"error","id":..,"error":..,"message":..,"stacktrace":""}`
+pub(crate) fn error(id: &Value, code: &str, message: &str) -> Value {
+    json!({ "type": "error", "id": id, "error": code, "message": message, "stacktrace": "" })
+}
+
+/// A reply that is not sent: it closes the socket at that point of a reply list.
+///
+/// Replies before it are delivered and replies after it are not, which is how
+/// Firefox behaves when it answers `session.end` or dies mid-conversation.
+pub(crate) fn close_marker() -> Value {
+    json!({ "__mock": "close" })
 }
 
 /// `{"type":"event","method":..,"params":..}`
@@ -348,9 +388,35 @@ pub(crate) fn fixture(name: &str) -> Value {
         .unwrap_or_else(|error| panic!("fixture {name} is not valid JSON: {error}"))
 }
 
+/// A captured reply re-addressed to `command`: the same message Firefox sent,
+/// with the `id` of the command it now answers.
+pub(crate) fn fixture_for(name: &str, command: &Value) -> Value {
+    let mut reply = fixture(name);
+    reply["id"] = command["id"].clone();
+    reply
+}
+
 /// Never answers anything: for timeouts and for tests that script replies by hand.
 pub(crate) fn silent() -> Handler {
     Box::new(|_| Vec::new())
+}
+
+/// `inner`, except that `replies` decides what `method` gets.
+///
+/// The way to script an error, a captured reply or a dying socket for one
+/// command without rewriting the whole handler.
+pub(crate) fn answering(
+    inner: Handler,
+    method: &'static str,
+    replies: impl Fn(&Value) -> Vec<Value> + Send + Sync + 'static,
+) -> Handler {
+    Box::new(move |command| {
+        if command["method"].as_str() == Some(method) {
+            replies(command)
+        } else {
+            inner(command)
+        }
+    })
 }
 
 /// Answers like a Firefox with an idle session; per-method result overrides.
@@ -544,6 +610,143 @@ mod tests {
         assert_eq!(read_raw(&mut client).await["type"], "target-available-form");
         // And only then the reply from the requested actor
         assert_eq!(read_raw(&mut client).await, json!({ "from": "watcher1" }));
+    }
+
+    /// Reads frames until the socket ends, returning the JSON ones.
+    async fn read_until_closed(client: &mut RawClient) -> Vec<Value> {
+        let mut seen = Vec::new();
+        loop {
+            let frame = timeout(Duration::from_secs(2), client.next())
+                .await
+                .expect("the socket neither delivered a frame nor closed within 2 s");
+            match frame {
+                Some(Ok(Message::Text(text))) => {
+                    seen.push(serde_json::from_str(text.as_str()).expect("a JSON frame"));
+                }
+                // A close frame is followed by the end of the stream.
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => return seen,
+            }
+        }
+    }
+
+    /// MCK-06: A close marker among the replies closes the socket at that point.
+    #[tokio::test]
+    async fn close_marker_closes_the_socket_in_order() {
+        // Given a handler that answers, then dies, then would answer again
+        let handler = answering(firefox_like(vec![]), "x.dies", |command| {
+            vec![
+                success(&command["id"], json!({})),
+                close_marker(),
+                event("x.late", json!({})),
+            ]
+        });
+        let server = MockServer::start(handler).await;
+        let mut client = connect_raw(&server.ws_url()).await;
+
+        // When the client sends that command
+        send_raw(
+            &mut client,
+            json!({ "id": 1, "method": "x.dies", "params": {} }),
+        )
+        .await;
+
+        // Then it reads the reply sent before the marker and nothing after it,
+        // not even the marker itself
+        let seen = read_until_closed(&mut client).await;
+        assert_eq!(seen, [success(&json!(1), json!({}))]);
+    }
+
+    /// MCK-07: `answering` replaces the replies of one method and leaves the rest alone.
+    #[tokio::test]
+    async fn answering_overrides_one_method_only() {
+        // Given a handler that makes session.new fail
+        let handler = answering(firefox_like(vec![]), "session.new", |command| {
+            vec![error(&command["id"], "session not created", "busy")]
+        });
+        let server = MockServer::start(handler).await;
+        let mut client = connect_raw(&server.ws_url()).await;
+
+        // When the client sends the overridden method and another one
+        send_raw(
+            &mut client,
+            json!({ "id": 1, "method": "session.new", "params": {} }),
+        )
+        .await;
+        send_raw(
+            &mut client,
+            json!({ "id": 2, "method": "session.status", "params": {} }),
+        )
+        .await;
+
+        // Then the first gets the scripted error, shaped like a real one
+        let expected = json!({
+            "type": "error",
+            "id": 1,
+            "error": "session not created",
+            "message": "busy",
+            "stacktrace": "",
+        });
+        assert_eq!(read_raw(&mut client).await, expected);
+        // And the second keeps the default reply
+        assert_eq!(read_raw(&mut client).await["result"]["ready"], true);
+    }
+
+    /// MCK-08: `fixture_for` re-addresses a captured reply to the command it answers.
+    #[test]
+    fn fixture_for_readdresses_a_captured_reply() {
+        // Given a command and a captured Firefox error
+        let command = json!({ "id": 42, "method": "session.new", "params": {} });
+
+        // When the fixture is re-addressed to it
+        let reply = fixture_for("bidi/session-new-busy.json", &command);
+
+        // Then it carries the command's id and everything else Firefox sent
+        assert_eq!(reply["id"], 42);
+        assert_eq!(reply["error"], "session not created");
+        assert_eq!(reply["message"], "Maximum number of active sessions");
+    }
+
+    /// MCK-09: `next_command_named` skips other commands.
+    #[tokio::test]
+    async fn next_command_named_skips_other_commands() {
+        // Given a server that received two commands
+        let mut server = MockServer::start(silent()).await;
+        let mut client = connect_raw(&server.ws_url()).await;
+        send_raw(
+            &mut client,
+            json!({ "id": 1, "method": "a.b", "params": {} }),
+        )
+        .await;
+        send_raw(
+            &mut client,
+            json!({ "id": 2, "method": "c.d", "params": {} }),
+        )
+        .await;
+
+        // When the second is asked for by name
+        let wanted = server.next_command_named("c.d").await;
+
+        // Then it is returned, and the skipped one is not handed out again
+        assert_eq!(wanted["id"], 2);
+        server.assert_no_command(Duration::from_millis(50)).await;
+    }
+
+    /// MCK-10: `assert_no_command` fails when a command does arrive.
+    #[tokio::test]
+    #[should_panic(expected = "unexpected command")]
+    async fn assert_no_command_fails_when_one_arrives() {
+        // Given a server that received a command
+        let mut server = MockServer::start(silent()).await;
+        let mut client = connect_raw(&server.ws_url()).await;
+        send_raw(
+            &mut client,
+            json!({ "id": 1, "method": "a.b", "params": {} }),
+        )
+        .await;
+
+        // Then asserting that none arrives panics instead of passing vacuously
+        server.assert_no_command(WAIT).await;
     }
 
     /// MCK-05: Every declared fixture parses as JSON.

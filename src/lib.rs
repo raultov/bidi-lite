@@ -9,6 +9,7 @@ pub mod error;
 pub mod event_filter;
 pub mod protocol;
 pub mod rdp;
+mod session;
 pub mod tab;
 mod transport;
 

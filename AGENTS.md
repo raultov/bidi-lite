@@ -95,7 +95,8 @@ src/
 ├── protocol.rs       WsCommand, WsResponse, NoParams (BiDi wire)
 ├── error.rs          BidiError, BidiResult, error codes
 ├── transport.rs      WebSocket connect, writer task, reader loop (shared)
-├── client.rs         BidiClient: dispatch, routing, session lifecycle, subscriptions
+├── client.rs         BidiClient: connect, command dispatch, reply/event routing
+├── session.rs        impl BidiClient: session lifecycle and event subscriptions
 ├── event_filter.rs   EventFilter<T>: module/context (BiDi) or type/actor (RDP) filters
 ├── browser.rs        BrowserClient, ContextInfo, ReadinessState
 ├── tab.rs            Tab: one top-level browsing context
