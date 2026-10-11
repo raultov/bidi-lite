@@ -80,7 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `frame_environment`, `evaluate_on_frame` and `evaluate`; `detach`. Breakpoints
   go through the watcher's breakpoint list, so they survive reloads and
   navigations; without a column the first breakable position of the line is
-  used. Every navigation, reload included, gives the tab a new thread and
+  used, and `find_in_sources` returns a line without a column for that reason:
+  Firefox ignores a breakpoint at a column it cannot break at. Every
+  navigation, reload included, gives the tab a new thread and
   console actor, which the debugger follows. `detach` removes the breakpoints
   it set before unwatching, because a breakpoint left behind freezes the page.
   Types and pure parsers (`SourceInfo`, `BreakpointLocation`, `FrameInfo`,
@@ -92,4 +94,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events, then filter them by module); `runtime_usage` (`script.evaluate`,
   promises, `script.callFunction`, exceptions versus protocol errors, console);
   `multi_tab` (several tabs on one session, per-tab listeners, context discovery);
-  `multi_tab_parallel` (several pages loading at once over one connection).
+  `multi_tab_parallel` (several pages loading at once over one connection);
+  `breakpoints_usage` (BiDi drives the page, the RDP debugger breaks in its
+  script, reads a variable in the paused frame and pauses on an exception).
