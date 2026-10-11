@@ -10,3 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Project scaffolding: quality gates (`make check`: fmt, clippy, tests, docs,
   duplication), CI on Linux, macOS and Windows, `AGENTS.md`.
+- `protocol` module: `WsCommand`, `WsResponse` (with `is_event`, `is_error` and
+  `event_context`) and `NoParams`, the wire types of WebDriver BiDi. `NoParams`
+  serializes to `{}` because BiDi rejects `"params": null`.
