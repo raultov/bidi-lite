@@ -1,0 +1,47 @@
+# Clippy thresholds for bidi-lite.
+#
+# Derived from knot-lite's clippy.toml on 2026-10-11. bidi-lite is greenfield,
+# so it starts at knot-lite's *target* values instead of its current ones.
+# POLICY: values may only ever be TIGHTENED, never loosened. Each phase gate
+# re-measures the curves below and records them (see "Measuring").
+#
+# NOTE: a threshold here does NOT enable a lint, it only parametrises it:
+#   too_many_arguments    complexity  warn   -> active out of the box
+#   type_complexity       complexity  warn   -> active out of the box
+#   excessive_nesting     complexity  warn   -> active once threshold > 0
+#   too_many_lines        pedantic    allow  -> enabled in Cargo.toml [lints.clippy]
+#   cognitive_complexity  nursery     allow  -> enabled in Cargo.toml [lints.clippy]
+
+# clippy::too_many_arguments (default: 7). cdp-lite used 4; knot-lite 5.
+# Every public signature in the spec has <= 4 parameters counting &self
+# (e.g. connect_with_capacity(host, timeout, capacity)).
+too-many-arguments-threshold = 4
+
+# clippy::type_complexity (default: 250). knot-lite's target, cdp-lite's value.
+type-complexity-threshold = 150
+
+# clippy::excessive_nesting (default: 0 = disabled). knot-lite's target.
+excessive-nesting-threshold = 5
+
+# clippy::too_many_lines (pedantic, default: 100). cdp-lite used 50 for
+# production code. Applies to tests too: long tests are split into Given/When/Then
+# helpers (see docs/specs 00 §9.2).
+too-many-lines-threshold = 50
+
+# clippy::cognitive_complexity (nursery, default: 25). cdp-lite used 15.
+# NOTE: tracing macros may inflate the score (knot-lite measured +7 per macro
+# when `tracing/log` is enabled). bidi-lite does not enable `tracing/log`;
+# re-measure in F2 and record the per-macro cost here.
+cognitive-complexity-threshold = 15
+
+# Library hygiene lints (Cargo.toml [lints.clippy]) are relaxed in test code
+# only. These are configuration, not #[allow] attributes.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+# --- Measured curves (appended at every phase gate) ---
+# Format: <lint>: <value> -> <violations> | ... (date, phase)
+# Phase 0 (2026-10-11, scaffolding):
+#   too_many_lines: 50 -> 0 | 40 -> 0 | 30 -> 0
+#   cognitive_complexity: 15 -> 0 | 10 -> 0 | 5 -> 0

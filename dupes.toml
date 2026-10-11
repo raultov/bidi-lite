@@ -1,0 +1,40 @@
+# Duplication thresholds for bidi-lite (cargo-dupes 0.2.1).
+#
+# Derived from knot-lite's dupes.toml on 2026-10-11. Greenfield project: the
+# ratchet starts at ZERO and may only stay there.
+#
+# IMPORTANT: cargo-dupes reads this file ONLY from the analysed directory (no
+# parent lookup) and `cargo dupes check` silently passes when none is found.
+# The Makefile refuses to run the gate without it.
+#
+# NOTE: cargo-dupes normalises the AST (identifiers become positional
+# placeholders, literal VALUES are erased). Two functions that differ only in
+# the string literals they embed collapse into one fingerprint: e.g. the BiDi
+# and RDP writer tasks, or two `Tab` helpers that only differ in the method
+# name. Fix those by extracting a parameterised helper (transport.rs,
+# `Tab::context_command`). Only a genuine false positive goes to
+# .dupes-ignore.toml, always with a `reason`; never raise the thresholds.
+
+# --- Analysis scope ---
+# Below 10 lines an extracted helper is rarely an improvement (knot measurement).
+min_lines = 10
+min_nodes = 10
+similarity_threshold = 0.8
+
+# --- Exclusions ---
+# Test code is repetitive by design (Given/When/Then). exclude_tests drops
+# #[test] functions and #[cfg(test)] modules. src/test_support.rs is
+# #[cfg(test)] at its `mod` declaration in lib.rs, which the parser cannot see
+# from inside the file, hence the explicit pattern.
+# examples/ are standalone programs, each meant to be read top to bottom; a
+# shared helper module across examples would hurt them as documentation.
+# docs/ holds the gitignored specs and the throw-away spike probe crate.
+# Patterns are plain substring matches on the path.
+exclude_tests = true
+exclude = ["tests/", "test_support.rs", "examples/", "/docs/"]
+
+# --- CI thresholds (consumed by `cargo dupes check`) ---
+max_exact_duplicates = 0
+max_near_duplicates = 0
+max_exact_percent = 0.0
+max_near_percent = 0.0
