@@ -160,7 +160,7 @@ impl BidiClient {
         let (responder, reply) = oneshot::channel();
         self.pending_requests
             .lock()
-            .map_err(|_| poisoned_lock())?
+            .map_err(|_| BidiError::poisoned_lock("pending-requests"))?
             .insert(id, responder);
         Ok(reply)
     }
@@ -234,7 +234,7 @@ impl Router for BidiRouter {
     }
 
     fn on_disconnect(&mut self) {
-        fail_pending_requests(&self.pending);
+        transport::fail_pending(&self.pending);
     }
 }
 
@@ -265,7 +265,10 @@ fn route_message(
 
 /// Gives a reply to the caller waiting for `id`, if there still is one.
 fn deliver(pending: &PendingRequests, id: u64, response: WsResponse) -> BidiResult<()> {
-    let responder = pending.lock().map_err(|_| poisoned_lock())?.remove(&id);
+    let responder = pending
+        .lock()
+        .map_err(|_| BidiError::poisoned_lock("pending-requests"))?
+        .remove(&id);
 
     match responder {
         Some(responder) => {
@@ -277,25 +280,6 @@ fn deliver(pending: &PendingRequests, id: u64, response: WsResponse) -> BidiResu
     }
 
     Ok(())
-}
-
-fn poisoned_lock() -> BidiError {
-    BidiError::InternalError(
-        "Mutex poisoned: another thread panicked while holding the pending-requests lock"
-            .to_string(),
-    )
-}
-
-/// Wakes every caller still waiting for a reply once the socket is gone.
-fn fail_pending_requests(pending: &PendingRequests) {
-    if let Ok(mut pending) = pending.lock() {
-        debug!(
-            "Closing {} pending requests due to disconnection",
-            pending.len()
-        );
-        // Dropping the senders wakes every receiver with an error.
-        pending.clear();
-    }
 }
 
 /// A client whose writer end is under the test's control: no socket involved.

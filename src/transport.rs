@@ -8,8 +8,9 @@
 use crate::error::{BidiError, BidiResult};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -62,25 +63,71 @@ fn has_path(url: &str) -> bool {
     authority_and_path.contains('/')
 }
 
+/// A way to write that does not keep the connection open.
+///
+/// A router that must answer on the wire (RDP sends the next queued request when
+/// a reply arrives) lives in the reader task, which lives as long as the socket.
+/// A strong sender held there would keep the writer queue open forever, so
+/// dropping every client would never close the socket (TRN-07). This one only
+/// borrows the queue: once every strong [`Connection`] is gone it stops working.
+#[derive(Clone)]
+pub(crate) struct WeakWriter {
+    command_tx: mpsc::WeakUnboundedSender<String>,
+}
+
+impl Connection {
+    /// A writer that does not keep this connection open. See [`WeakWriter`].
+    pub(crate) fn weak_writer(&self) -> WeakWriter {
+        WeakWriter {
+            command_tx: self.command_tx.downgrade(),
+        }
+    }
+}
+
+impl WeakWriter {
+    /// Queues one payload; `Disconnected` if every strong handle is gone or the
+    /// writer task has stopped.
+    pub(crate) fn send(&self, payload: String) -> BidiResult<()> {
+        // The strong sender lives only for this call, so it cannot keep the queue open.
+        let command_tx = self.command_tx.upgrade().ok_or(BidiError::Disconnected)?;
+        command_tx
+            .send(payload)
+            .map_err(|_| BidiError::Disconnected)
+    }
+}
+
 /// Opens the socket and spawns the writer task and the reader loop.
 pub(crate) async fn open<R: Router>(url: &str, router: R) -> BidiResult<Connection> {
+    open_with(url, |_| router).await
+}
+
+/// Like [`open`], for a router that needs the connection it will run on:
+/// `build` receives it before the tasks start.
+pub(crate) async fn open_with<R: Router>(
+    url: &str,
+    build: impl FnOnce(&Connection) -> R,
+) -> BidiResult<Connection> {
     let (socket, _) = connect_async(url).await?;
-    Ok(spawn(socket, router))
+    Ok(spawn(socket, build))
 }
 
 /// Spawns the writer task and the reader loop over an open socket.
-pub(crate) fn spawn<R: Router>(socket: WebSocket, router: R) -> Connection {
+pub(crate) fn spawn<R: Router>(
+    socket: WebSocket,
+    build: impl FnOnce(&Connection) -> R,
+) -> Connection {
     let (sink, source) = socket.split();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
-    let is_alive = Arc::new(AtomicBool::new(true));
+    let connection = Connection {
+        command_tx,
+        is_alive: Arc::new(AtomicBool::new(true)),
+    };
+    let router = build(&connection);
 
     tokio::spawn(write_commands(sink, command_rx));
-    tokio::spawn(read_loop(source, router, Arc::clone(&is_alive)));
+    tokio::spawn(read_loop(source, router, Arc::clone(&connection.is_alive)));
 
-    Connection {
-        command_tx,
-        is_alive,
-    }
+    connection
 }
 
 /// Queues one payload for the writer task.
@@ -92,6 +139,21 @@ pub(crate) fn send(connection: &Connection, payload: String) -> BidiResult<()> {
         connection.is_alive.store(false, Ordering::SeqCst);
         BidiError::Disconnected
     })
+}
+
+/// Wakes every caller still waiting for a reply once the socket is gone.
+///
+/// Both protocols keep their pending requests as a table of `oneshot` senders;
+/// dropping them is what makes each waiting caller see the connection end.
+pub(crate) fn fail_pending<K, V>(pending: &Mutex<HashMap<K, V>>) {
+    if let Ok(mut pending) = pending.lock() {
+        debug!(
+            "Closing {} pending entries due to disconnection",
+            pending.len()
+        );
+        // Dropping the senders wakes every receiver with an error.
+        pending.clear();
+    }
 }
 
 /// Applies the event-channel capacity policy.
@@ -324,17 +386,33 @@ mod tests {
         assert!(matches!(result, Err(BidiError::Ws(_))), "{result:?}");
     }
 
+    /// Whether the next frame of `socket` that is not text is a close frame.
+    async fn ends_with_close(mut socket: WebSocketStream<TcpStream>) -> bool {
+        // Frames sent while the connection was alive come first; wait for the end.
+        while let Some(Ok(frame)) = socket.next().await {
+            if matches!(frame, Message::Close(_)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A raw server that accepts one connection and reports whether the client closed it.
+    async fn close_watcher() -> (String, tokio::task::JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("address"));
+        let watcher = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            ends_with_close(accept_async(stream).await.expect("handshake")).await
+        });
+        (url, watcher)
+    }
+
     /// TRN-07: Dropping every handle to the connection closes the socket.
     #[tokio::test]
     async fn dropping_every_handle_closes_the_socket() {
         // Given a raw server that reports how the client's side ended
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let url = format!("ws://{}", listener.local_addr().expect("address"));
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept");
-            let mut socket = accept_async(stream).await.expect("handshake");
-            matches!(socket.next().await, Some(Ok(Message::Close(_))))
-        });
+        let (url, server) = close_watcher().await;
         let (router, _probe) = recording_router();
         let connection = open(&url, router).await.expect("connect");
 
@@ -347,6 +425,94 @@ mod tests {
             .expect("the socket stayed open after the last handle was dropped")
             .expect("the raw server task");
         assert!(saw_close, "the client must send a close frame");
+    }
+
+    /// A router that answers every frame through a weak writer.
+    struct EchoRouter {
+        writer: WeakWriter,
+    }
+
+    impl Router for EchoRouter {
+        fn route(&mut self, text: &str) {
+            let _ = self.writer.send(format!(r#"{{"echo":{text}}}"#));
+        }
+
+        fn on_disconnect(&mut self) {}
+    }
+
+    /// TRN-08: A router built from the connection can write through a weak writer.
+    #[tokio::test]
+    async fn router_can_write_through_a_weak_writer() {
+        // Given a connection whose router echoes every frame it receives
+        let mut server = MockServer::start(silent()).await;
+        let _connection = open_with(&server.ws_url(), |connection| EchoRouter {
+            writer: connection.weak_writer(),
+        })
+        .await
+        .expect("connect");
+
+        // When the server pushes a frame
+        server.push(json!({ "n": 1 }));
+
+        // Then the router's answer reaches the server
+        assert_eq!(server.next_command().await, json!({ "echo": { "n": 1 } }));
+    }
+
+    /// TRN-09: A weak writer does not keep the connection open.
+    #[tokio::test]
+    async fn weak_writer_does_not_keep_the_connection_open() {
+        // Given a raw server that reports how the client's side ended
+        let (url, server) = close_watcher().await;
+        // And a router that holds a weak writer, of which the test keeps a copy
+        let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+        let connection = open_with(&url, move |connection| {
+            let writer = connection.weak_writer();
+            writer_tx
+                .send(writer.clone())
+                .expect("the test is listening");
+            EchoRouter { writer }
+        })
+        .await
+        .expect("connect");
+        let writer = writer_rx.recv().expect("the builder ran");
+        assert!(
+            writer.send("{}".to_string()).is_ok(),
+            "alive while a strong handle exists"
+        );
+
+        // When every strong handle is dropped
+        drop(connection);
+
+        // Then the server still sees a close frame
+        let saw_close = timeout(WAIT, server)
+            .await
+            .expect("the router's weak writer kept the socket open")
+            .expect("the raw server task");
+        assert!(saw_close, "the client must send a close frame");
+        // And the weak writer no longer works
+        let result = writer.send("{}".to_string());
+        assert!(matches!(result, Err(BidiError::Disconnected)), "{result:?}");
+    }
+
+    /// TRN-10: Failing the pending requests wakes every waiter.
+    #[test]
+    fn failing_pending_requests_wakes_every_waiter() {
+        // Given a table with two callers waiting
+        let (first_tx, first) = oneshot::channel::<()>();
+        let (second_tx, second) = oneshot::channel::<()>();
+        let pending = Mutex::new(HashMap::from([(1_u64, first_tx), (2, second_tx)]));
+
+        // When the pending requests are failed
+        fail_pending(&pending);
+
+        // Then the table is empty and both callers see their sender gone
+        assert!(pending.lock().expect("lock").is_empty());
+        for waiter in [first, second] {
+            assert!(matches!(
+                waiter.try_recv(),
+                Err(oneshot::TryRecvError::Disconnected)
+            ));
+        }
     }
 
     /// CLI-10: Capacity zero degrades to one.

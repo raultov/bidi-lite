@@ -1,6 +1,7 @@
 //! Error types for the BiDi and RDP protocols.
 
 use crate::protocol::WsResponse;
+use crate::rdp::protocol::RdpPacket;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -109,6 +110,38 @@ impl BidiError {
         }
     }
 
+    /// Builds a [`BidiError::ProtocolError`] from an RDP error packet.
+    ///
+    /// RDP error codes are strings too (`"noSuchActor"`, `"wrongState"`, ...), so
+    /// both protocols surface the same variant. RDP carries no stack trace. A packet
+    /// without a code degrades to `"unknownError"` instead of failing.
+    ///
+    /// Public for the same reason as [`BidiError::from_response`]: code holding raw
+    /// packets (from `RdpClient::subscribe`) can build the error the client returns.
+    pub fn from_rdp(packet: &RdpPacket) -> Self {
+        Self::ProtocolError {
+            error: packet
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknownError".to_string()),
+            message: packet
+                .message
+                .clone()
+                .unwrap_or_else(|| "Unknown RDP error".to_string()),
+            stacktrace: None,
+        }
+    }
+
+    /// The error for a lock whose holder panicked.
+    ///
+    /// `lock` names what the lock guards, so the message says which table was
+    /// left in an unknown state.
+    pub(crate) fn poisoned_lock(lock: &str) -> Self {
+        Self::InternalError(format!(
+            "Mutex poisoned: another thread panicked while holding the {lock} lock"
+        ))
+    }
+
     /// The error for a reply that lacks a field the library depends on.
     ///
     /// An [`InternalError`](BidiError::InternalError) rather than a protocol
@@ -215,6 +248,69 @@ mod tests {
         let shown = error.to_string();
         assert!(shown.contains("invalid argument"), "got: {shown}");
         assert!(shown.contains("bad url"), "got: {shown}");
+    }
+
+    /// ERR-07: An RDP error packet becomes `ProtocolError` without a stack trace.
+    #[test]
+    fn rdp_error_maps_to_protocol_error_without_stacktrace() {
+        // Given an RDP error packet
+        let packet =
+            RdpPacket::parse(r#"{"from":"thread1","error":"wrongState","message":"not paused"}"#)
+                .expect("a packet");
+
+        // When it is converted
+        let error = BidiError::from_rdp(&packet);
+
+        // Then it is the same variant BiDi errors use, with code and message
+        let BidiError::ProtocolError {
+            error: code,
+            message,
+            stacktrace,
+        } = error
+        else {
+            panic!("expected ProtocolError, got {error:?}");
+        };
+        assert_eq!(code, "wrongState");
+        assert_eq!(message, "not paused");
+        assert_eq!(stacktrace, None);
+    }
+
+    /// ERR-08: Missing RDP error fields degrade to defaults.
+    #[test]
+    fn missing_rdp_error_fields_degrade_to_defaults() {
+        // Given a packet with neither code nor message
+        let packet = RdpPacket::parse(r#"{"from":"thread1"}"#).expect("a packet");
+
+        // When it is converted
+        let error = BidiError::from_rdp(&packet);
+
+        // Then the defaults fill in
+        let BidiError::ProtocolError {
+            error: code,
+            message,
+            ..
+        } = error
+        else {
+            panic!("expected ProtocolError, got {error:?}");
+        };
+        assert_eq!(code, "unknownError");
+        assert_eq!(message, "Unknown RDP error");
+    }
+
+    /// ERR-09: A poisoned lock is an internal error naming what it guards.
+    #[test]
+    fn poisoned_lock_is_an_internal_error_naming_the_lock() {
+        // Given the error for a poisoned lock on the pending requests
+        let error = BidiError::poisoned_lock("pending-requests");
+
+        // Then it is an InternalError that says which lock
+        let BidiError::InternalError(message) = error else {
+            panic!("expected InternalError, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            "Mutex poisoned: another thread panicked while holding the pending-requests lock"
+        );
     }
 
     /// ERR-06: A missing reply field is an internal error naming method and field.

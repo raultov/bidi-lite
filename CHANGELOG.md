@@ -60,3 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `script_target` put it where each command expects it. `on_module` and
   `events` are filters limited to the tab (they need `subscribe_events` first).
   Also re-exports `ReadinessState`.
+- `rdp` module, the Firefox Remote Debugging Protocol (the part of the debugger
+  that BiDi lacks): `RdpPacket`, `encode_request` and `UNSOLICITED_TYPES` for the
+  wire, and `RdpClient` (`connect`, `request`, `list_tabs`, `subscribe`, `on_type`,
+  `on_actor`). RDP has no request ids, so each actor answers its requests in order:
+  `RdpClient` keeps one request per actor on the wire and queues the rest, while
+  requests to different actors run in parallel. A request that times out or is
+  cancelled keeps its place until Firefox answers it, so a late reply is never
+  handed to the next request. An RDP error surfaces as the same
+  `BidiError::ProtocolError` as a BiDi one (`BidiError::from_rdp`), and
+  `EventFilter` gains `rdp_type` and `rdp_actor` for the notifications.

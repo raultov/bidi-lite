@@ -45,6 +45,7 @@ pub(crate) struct MockServer {
     commands: mpsc::UnboundedReceiver<Value>,
     control: mpsc::UnboundedSender<Control>,
     path: tokio_oneshot::Receiver<String>,
+    closed: tokio_oneshot::Receiver<()>,
 }
 
 /// What the test can ask the server to do once the client is connected.
@@ -80,6 +81,7 @@ impl MockServer {
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (control, control_rx) = mpsc::unbounded_channel();
         let (path_tx, path) = tokio_oneshot::channel();
+        let (closed_tx, closed) = tokio_oneshot::channel();
         let plumbing = Plumbing {
             handler,
             commands: commands_tx,
@@ -87,13 +89,18 @@ impl MockServer {
             greeting: options.greeting,
         };
 
-        tokio::spawn(serve(listener, path_tx, plumbing));
+        tokio::spawn(async move {
+            serve(listener, path_tx, plumbing).await;
+            // The test may not be waiting for the end of the connection.
+            let _ = closed_tx.send(());
+        });
 
         Self {
             addr,
             commands,
             control,
             path,
+            closed,
         }
     }
 
@@ -151,6 +158,15 @@ impl MockServer {
             .await
             .expect("no WebSocket handshake reached the mock within 2 s")
             .expect("the mock server task ended")
+    }
+
+    /// Resolves once the connection has ended, e.g. because the client closed the
+    /// socket. Panics after 2 s, so a client that leaves it open fails the test.
+    pub(crate) async fn wait_until_closed(&mut self) {
+        timeout(WAIT, &mut self.closed)
+            .await
+            .expect("the client did not close the socket within 2 s")
+            .expect("the mock server task panicked");
     }
 
     /// Sends an arbitrary message to the client at any time.
@@ -747,6 +763,35 @@ mod tests {
 
         // Then asserting that none arrives panics instead of passing vacuously
         server.assert_no_command(WAIT).await;
+    }
+
+    /// MCK-11: It reports when the client closes the socket.
+    #[tokio::test]
+    async fn mock_reports_the_client_closing() {
+        // Given a connected raw client
+        let mut server = MockServer::start(silent()).await;
+        let mut client = connect_raw(&server.ws_url()).await;
+
+        // When it closes the socket
+        client
+            .close(None)
+            .await
+            .expect("the raw client should close");
+
+        // Then the server reports the end of the connection
+        server.wait_until_closed().await;
+    }
+
+    /// MCK-12: `wait_until_closed` fails when the client stays connected.
+    #[tokio::test]
+    #[should_panic(expected = "did not close")]
+    async fn wait_until_closed_fails_if_the_client_stays_connected() {
+        // Given a client that stays connected
+        let mut server = MockServer::start(silent()).await;
+        let _client = connect_raw(&server.ws_url()).await;
+
+        // Then waiting for the close panics instead of passing vacuously
+        server.wait_until_closed().await;
     }
 
     /// MCK-05: Every declared fixture parses as JSON.

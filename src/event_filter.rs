@@ -5,6 +5,7 @@
 
 use crate::error::{BidiError, BidiResult};
 use crate::protocol::WsResponse;
+use crate::rdp::protocol::RdpPacket;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::broadcast;
@@ -78,6 +79,23 @@ impl EventFilter<WsResponse> {
         let context = context.into();
         Self::with_predicate(receiver, move |event| {
             bidi_matches(&prefix, Some(&context), event)
+        })
+    }
+}
+
+impl EventFilter<RdpPacket> {
+    /// Notifications whose `type` equals `kind`; `""` matches every packet.
+    pub fn rdp_type(receiver: broadcast::Receiver<RdpPacket>, kind: &'static str) -> Self {
+        Self::with_predicate(receiver, move |packet| {
+            kind.is_empty() || packet.r#type.as_deref() == Some(kind)
+        })
+    }
+
+    /// Notifications sent by one actor.
+    pub fn rdp_actor(receiver: broadcast::Receiver<RdpPacket>, actor: impl Into<String>) -> Self {
+        let actor = actor.into();
+        Self::with_predicate(receiver, move |packet| {
+            packet.from.as_deref() == Some(actor.as_str())
         })
     }
 }
@@ -381,6 +399,32 @@ mod tests {
 
         // Then the stream ends
         assert!(filter.next().await.is_none());
+    }
+
+    /// EVF-13: RDP filters match by type and by actor.
+    #[tokio::test]
+    async fn rdp_filters_match_type_and_actor() {
+        // Given a filter by type, one by actor and one on every type
+        let (tx, rx) = broadcast::channel(16);
+        let mut paused = EventFilter::rdp_type(rx, "paused");
+        let mut thread = EventFilter::rdp_actor(tx.subscribe(), "thread1");
+        let mut everything = EventFilter::rdp_type(tx.subscribe(), "");
+
+        // When a console result and two thread notifications are broadcast
+        let packet = |text: &str| RdpPacket::parse(text).expect("a packet");
+        let _ = tx.send(packet(r#"{"from":"console1","type":"evaluationResult"}"#));
+        let _ = tx.send(packet(r#"{"from":"thread1","type":"paused"}"#));
+        let _ = tx.send(packet(r#"{"from":"thread1","type":"resumed"}"#));
+
+        // Then the type filter yields only the paused one
+        let types = |packets: &[RdpPacket]| -> Vec<String> {
+            packets.iter().filter_map(|p| p.r#type.clone()).collect()
+        };
+        assert_eq!(types(&take(&mut paused, 1).await), ["paused"]);
+        // And the actor filter yields both thread notifications and nothing from the console
+        assert_eq!(types(&take(&mut thread, 2).await), ["paused", "resumed"]);
+        // And the empty type yields every packet
+        assert_eq!(take(&mut everything, 3).await.len(), 3);
     }
 
     /// EVF-12: A custom predicate over any message type works and lags the same way.
