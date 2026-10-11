@@ -99,3 +99,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script, reads a variable in the paused frame and pauses on an exception);
   `proxy_usage` (a per-user-context proxy with credentials answered from
   `network.authRequired`; skipped unless `PROXY_*` are set).
+- `make e2e` (`tests/run_all_e2e.sh`): runs every example against a real
+  Firefox and checks its output; not part of `make check`.
