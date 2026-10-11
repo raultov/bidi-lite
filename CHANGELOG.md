@@ -88,4 +88,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parse_sources`, `locate`...) live in `rdp::resources` and are re-exported
   from `rdp::debugger`. Checked against Firefox 157.
 - Examples, each runnable against a real Firefox (`tests/firefox.sh start`):
-  `simple` (start a session, navigate, end it).
+  `simple` (start a session, navigate, end it); `filter_domains` (subscribe to
+  events, then filter them by module).
