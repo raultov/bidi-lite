@@ -54,3 +54,11 @@ allow-panic-in-tests = true
 # Thresholds left as they are: three small modules say little about the
 # client and the debugger, which are the code that will stress them. The
 # ratchet is applied at the final measurement (roadmap, phase 14).
+# Final measurement (2026-10-11, phase 14; 203 unit tests, 7 examples):
+#   too_many_lines: 50 -> 0 | 40 -> 1 | 30 -> 3
+#   cognitive_complexity: 15 -> 0 | 12 -> 0 | 10 -> 1
+#   too_many_arguments: 4 -> 0 | 3 -> 7
+#   excessive_nesting: 5 -> 0 | 4 -> 2 | 3 -> 61
+#   type_complexity: 150 -> 0 | 100 -> 1
+# Only cognitive_complexity could go down (to 12) with 0 violations. Not applied:
+# the human asked to keep the thresholds as they are; pending their decision.
