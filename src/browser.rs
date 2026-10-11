@@ -172,13 +172,13 @@ impl BrowserClient {
             .to_string();
 
         let tab = Tab::new(self.client.clone(), context);
-        if url != "about:blank" {
-            if let Err(error) = tab.navigate(url, ReadinessState::None).await {
-                // The navigation error is the one that matters; failing to close
-                // the tab we just opened would only hide it.
-                let _ = tab.close().await;
-                return Err(error);
-            }
+        if url != "about:blank"
+            && let Err(error) = tab.navigate(url, ReadinessState::None).await
+        {
+            // The navigation error is the one that matters; failing to close
+            // the tab we just opened would only hide it.
+            let _ = tab.close().await;
+            return Err(error);
         }
 
         Ok(tab)

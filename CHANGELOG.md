@@ -108,32 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README: quick start, sessions, event subscription and lag, multiple tabs, a
   cdp-lite equivalence table, four architecture diagrams, the RDP debugger with
   its limitations, quality gates and examples.
-
-### Changed
-- Dependencies updated to their latest releases: tokio 1.53, tokio-stream 0.1.19,
-  tokio-tungstenite 0.30, futures-util 0.3.34, serde 1.0.229, serde_json 1.0.153,
-  thiserror 2.0.21, oneshot 0.2 (with its `async` feature, now opt-in) and, for
-  the examples, tracing-subscriber 0.3.23.
-
-### Fixed
-- `Debugger::on_thread_state` and `on_sources` no longer drop the first packets
-  of a new target when the debugger's background task has not seen the target
-  switch yet (a pause right after a reload could be lost and the page left
-  paused); `thread_actor()` is then already the new one.
-- The debugger's background task stops when the last clone of the `Debugger` is
-  dropped, instead of living as long as the connection.
-- A failed `Debugger::attach` stops watching the tab's targets.
-- `rdp::resources::locate` counts CR, U+2028 and U+2029 as line breaks, as
-  JavaScript does.
-- `BidiClient::end_session` and `BrowserClient::close_browser` return
-  `Disconnected` when the connection was already gone, instead of reporting
-  success for a command that was never sent (the session stays reported).
-- A command sent while the connection is closing fails with `Disconnected`
-  instead of waiting for its whole timeout.
-- A `session.new` that times out is followed by `session.end`, so a session
-  Firefox created anyway does not block it until restarted.
-- `BrowserClient::end` resets context discovery, so it can be turned on again in
-  a new session.
-- The `proxy_usage` example only sends the proxy's credentials to proxy
-  challenges (407), never to a site asking for its own (401), and keeps
-  answering after missed events.
+- Ending things safely: `BidiClient::end_session` and
+  `BrowserClient::close_browser` return `Disconnected` if the connection was
+  already gone (nothing was sent, so the session is still reported); a
+  `session.new` that times out is followed by `session.end`, so a session
+  Firefox created anyway does not block it; `BrowserClient::end` resets context
+  discovery so it can be turned on again in a new session.
+- Requires Rust 1.98.

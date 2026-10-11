@@ -32,7 +32,7 @@ too-many-lines-threshold = 50
 # NOTE: tracing macros may inflate the score (knot-lite measured +7 per macro
 # when `tracing/log` is enabled). bidi-lite does not enable `tracing/log`;
 # re-measure in F2 and record the per-macro cost here.
-cognitive-complexity-threshold = 15
+cognitive-complexity-threshold = 12
 
 # Library hygiene lints (Cargo.toml [lints.clippy]) are relaxed in test code
 # only. These are configuration, not #[allow] attributes.
@@ -60,5 +60,5 @@ allow-panic-in-tests = true
 #   too_many_arguments: 4 -> 0 | 3 -> 7
 #   excessive_nesting: 5 -> 0 | 4 -> 2 | 3 -> 61
 #   type_complexity: 150 -> 0 | 100 -> 1
-# Only cognitive_complexity could go down (to 12) with 0 violations. Not applied:
-# the human asked to keep the thresholds as they are; pending their decision.
+# Only cognitive_complexity could go down (to 12) with 0 violations: applied at the
+# human's request after the final review.

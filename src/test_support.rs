@@ -209,10 +209,10 @@ async fn serve(
     };
     let (mut sink, mut source) = socket.split();
 
-    if let Some(greeting) = plumbing.greeting.take() {
-        if send_json(&mut sink, &greeting).await.is_err() {
-            return;
-        }
+    if let Some(greeting) = plumbing.greeting.take()
+        && send_json(&mut sink, &greeting).await.is_err()
+    {
+        return;
     }
 
     loop {
