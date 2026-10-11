@@ -101,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `network.authRequired`; skipped unless `PROXY_*` are set).
 - `make e2e` (`tests/run_all_e2e.sh`): runs every example against a real
   Firefox and checks its output; not part of `make check`.
+- Crate documentation with compiled examples: navigation, events, several tabs,
+  raw access and JavaScript debugging.
 
 ### Changed
 - Dependencies updated to their latest releases: tokio 1.53, tokio-stream 0.1.19,
