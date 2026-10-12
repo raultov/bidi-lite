@@ -382,6 +382,14 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/rdp/listTabs.json"),
     ),
     (
+        "rdp/resources-css-message.json",
+        include_str!("../tests/fixtures/rdp/resources-css-message.json"),
+    ),
+    (
+        "rdp/resources-error-message.json",
+        include_str!("../tests/fixtures/rdp/resources-error-message.json"),
+    ),
+    (
         "rdp/resources-sources.json",
         include_str!("../tests/fixtures/rdp/resources-sources.json"),
     ),
@@ -392,6 +400,10 @@ const FIXTURES: &[(&str, &str)] = &[
     (
         "rdp/resources-thread-state-resumed.json",
         include_str!("../tests/fixtures/rdp/resources-thread-state-resumed.json"),
+    ),
+    (
+        "rdp/resources-websocket.json",
+        include_str!("../tests/fixtures/rdp/resources-websocket.json"),
     ),
     (
         "rdp/source-long-string.json",
@@ -565,13 +577,13 @@ pub(crate) fn rdp_firefox_like(overrides: Vec<RdpOverride>) -> Handler {
             .find(|((actor, method), _)| *actor == to && *method == kind);
         match overridden {
             Some((_, replies)) => replies.clone(),
-            None => default_rdp_replies(to, kind),
+            None => default_rdp_replies(packet, to, kind),
         }
     })
 }
 
 /// The idle-Firefox answer to an RDP request of type `kind` sent to `to`.
-fn default_rdp_replies(to: &str, kind: &str) -> Vec<Value> {
+fn default_rdp_replies(packet: &Value, to: &str, kind: &str) -> Vec<Value> {
     match kind {
         "listTabs" => vec![rdp_reply(to, fixture("rdp/listTabs.json"))],
         "getWatcher" => vec![rdp_reply(to, fixture("rdp/getWatcher.json"))],
@@ -587,14 +599,32 @@ fn default_rdp_replies(to: &str, kind: &str) -> Vec<Value> {
             rdp_reply(to, fixture("rdp/target-available.json")),
             rdp_reply(to, json!({})),
         ],
-        "watchResources" => vec![
-            fixture("rdp/resources-sources.json"),
-            rdp_reply(to, json!({})),
-        ],
+        "watchResources" => watch_resources_replies(packet, to),
         // One-way requests: Firefox never answers them.
         "unwatchTargets" | "unwatchResources" => Vec::new(),
         _ => vec![rdp_reply(to, json!({}))],
     }
+}
+
+fn watch_resources_replies(packet: &Value, to: &str) -> Vec<Value> {
+    let mut replies = Vec::new();
+    let types = packet.get("resourceTypes").and_then(Value::as_array);
+    let has =
+        |name: &str| types.is_none_or(|arr| arr.iter().any(|item| item.as_str() == Some(name)));
+    if has("source") {
+        replies.push(fixture("rdp/resources-sources.json"));
+    }
+    if has("websocket") && types.is_some() {
+        replies.push(fixture("rdp/resources-websocket.json"));
+    }
+    if has("error-message") && types.is_some() {
+        replies.push(fixture("rdp/resources-error-message.json"));
+    }
+    if has("css-message") && types.is_some() {
+        replies.push(fixture("rdp/resources-css-message.json"));
+    }
+    replies.push(rdp_reply(to, json!({})));
+    replies
 }
 
 #[cfg(test)]

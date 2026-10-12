@@ -1,0 +1,53 @@
+{
+  "array": [
+    [
+      "css-message",
+      [
+        {
+          "cssSelectors": ".bad-css",
+          "pageError": {
+            "category": "CSS Parser",
+            "chromeContext": false,
+            "columnNumber": 7,
+            "error": false,
+            "errorMessage": "Unknown property ‘unknown-prop-test’.  Declaration dropped.",
+            "info": false,
+            "innerWindowID": 15032385537,
+            "isForwardedFromContentProcess": false,
+            "lineNumber": 4,
+            "notes": null,
+            "private": false,
+            "sourceId": null,
+            "sourceName": "https://example.com/test.html",
+            "stacktrace": null,
+            "timeStamp": 1791822684593.616,
+            "warning": true
+          }
+        },
+        {
+          "cssSelectors": ".bad-css",
+          "pageError": {
+            "category": "CSS Parser",
+            "chromeContext": false,
+            "columnNumber": 7,
+            "error": false,
+            "errorMessage": "Error in parsing value for ‘color: not-a-valid-color-xyz;’.  Declaration dropped.",
+            "info": false,
+            "innerWindowID": 15032385537,
+            "isForwardedFromContentProcess": false,
+            "lineNumber": 5,
+            "notes": null,
+            "private": false,
+            "sourceId": null,
+            "sourceName": "https://example.com/test.html",
+            "stacktrace": null,
+            "timeStamp": 1791822684593.62,
+            "warning": true
+          }
+        }
+      ]
+    ]
+  ],
+  "from": "server1.conn1.watcher2.process7//windowGlobalTarget2",
+  "type": "resources-available-array"
+}

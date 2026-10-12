@@ -1,0 +1,84 @@
+{
+  "array": [
+    [
+      "error-message",
+      [
+        {
+          "pageError": {
+            "category": "content javascript",
+            "chromeContext": false,
+            "columnNumber": 7,
+            "error": true,
+            "errorMessage": "ReferenceError: nonExistentFunctionCallHere is not defined",
+            "errorMessageName": "JSMSG_NOT_DEFINED",
+            "exception": {
+              "actor": "server1.conn1.watcher2.process7//obj39",
+              "class": "ReferenceError",
+              "extensible": true,
+              "frozen": false,
+              "isError": true,
+              "ownPropertyLength": 4,
+              "preview": {
+                "columnNumber": 7,
+                "fileName": "https://example.com/test.html",
+                "kind": "Error",
+                "lineNumber": 43,
+                "message": "nonExistentFunctionCallHere is not defined",
+                "name": "ReferenceError",
+                "stack": "@https://example.com/test.html:43:7\n"
+              },
+              "sealed": false,
+              "type": "object"
+            },
+            "exceptionDocURL": "https://developer.mozilla.org/docs/Web/JavaScript/Reference/Errors/Not_defined?utm_source=devtools&utm_medium=firefox-console-errors&utm_campaign=default",
+            "hasException": true,
+            "info": false,
+            "innerWindowID": 15032385540,
+            "isForwardedFromContentProcess": false,
+            "isPromiseRejection": false,
+            "lineNumber": 43,
+            "notes": null,
+            "private": false,
+            "sourceId": null,
+            "sourceName": "https://example.com/test.html",
+            "stacktrace": [
+              {
+                "columnNumber": 7,
+                "filename": "https://example.com/test.html",
+                "functionName": null,
+                "lineNumber": 43,
+                "sourceId": null
+              }
+            ],
+            "timeStamp": 1791822789737.468,
+            "warning": false
+          }
+        },
+        {
+          "pageError": {
+            "category": "cookieSameSite",
+            "chromeContext": false,
+            "columnNumber": 0,
+            "error": true,
+            "errorMessage": "Cookie “insecure_cookie” rejected because it has the “SameSite=None” attribute but is missing the “secure” attribute.",
+            "errorMessageName": "",
+            "info": false,
+            "innerWindowID": 15032385540,
+            "isForwardedFromContentProcess": false,
+            "isPromiseRejection": false,
+            "lineNumber": 0,
+            "notes": null,
+            "private": false,
+            "sourceId": null,
+            "sourceName": "https://example.com/test.html",
+            "stacktrace": null,
+            "timeStamp": 1791822789635.98,
+            "warning": false
+          }
+        }
+      ]
+    ]
+  ],
+  "from": "server1.conn1.watcher2.process7//windowGlobalTarget2",
+  "type": "resources-available-array"
+}

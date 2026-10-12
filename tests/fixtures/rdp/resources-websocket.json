@@ -1,0 +1,105 @@
+{
+  "array": [
+    [
+      "websocket",
+      [
+        {
+          "effectiveURI": "ws://127.0.0.1:8808/",
+          "extensions": "",
+          "httpChannelId": 38,
+          "protocols": "",
+          "wsMessageType": "webSocketOpened"
+        },
+        {
+          "data": {
+            "finBit": true,
+            "mask": 490835910,
+            "maskBit": true,
+            "opCode": 1,
+            "payload": "Hello WebSocket frame text",
+            "rsvBit1": false,
+            "rsvBit2": false,
+            "rsvBit3": false,
+            "timeStamp": 1791822789699378,
+            "type": "sent"
+          },
+          "httpChannelId": 38,
+          "wsMessageType": "frameSent"
+        },
+        {
+          "data": {
+            "finBit": true,
+            "mask": 0,
+            "maskBit": false,
+            "opCode": 1,
+            "payload": "echo: Hello WebSocket frame text",
+            "rsvBit1": false,
+            "rsvBit2": false,
+            "rsvBit3": false,
+            "timeStamp": 1791822789750320,
+            "type": "received"
+          },
+          "httpChannelId": 38,
+          "wsMessageType": "frameReceived"
+        },
+        {
+          "data": {
+            "finBit": true,
+            "mask": 3232700658,
+            "maskBit": true,
+            "opCode": 2,
+            "payload": "ABCD",
+            "rsvBit1": false,
+            "rsvBit2": false,
+            "rsvBit3": false,
+            "timeStamp": 1791822789801738,
+            "type": "sent"
+          },
+          "httpChannelId": 38,
+          "wsMessageType": "frameSent"
+        },
+        {
+          "data": {
+            "finBit": true,
+            "mask": 0,
+            "maskBit": false,
+            "opCode": 2,
+            "payload": "ABCD",
+            "rsvBit1": false,
+            "rsvBit2": false,
+            "rsvBit3": false,
+            "timeStamp": 1791822789853100,
+            "type": "received"
+          },
+          "httpChannelId": 38,
+          "wsMessageType": "frameReceived"
+        },
+        {
+          "data": {
+            "finBit": true,
+            "mask": 1911840065,
+            "maskBit": true,
+            "opCode": 8,
+            "payload": "\u0003èNormal closure",
+            "rsvBit1": false,
+            "rsvBit2": false,
+            "rsvBit3": false,
+            "timeStamp": 1791822789903561,
+            "type": "sent"
+          },
+          "httpChannelId": 38,
+          "wsMessageType": "frameSent"
+        },
+        {
+          "code": 1000,
+          "httpChannelId": 38,
+          "reason": "Normal closure",
+          "wasClean": true,
+          "wsMessageType": "webSocketClosed"
+        }
+      ]
+    ]
+  ],
+  "from": "server1.conn1.watcher2.process7//windowGlobalTarget2",
+  "type": "resources-available-array"
+}
