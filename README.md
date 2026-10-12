@@ -317,6 +317,32 @@ debugger.detach().await?;
 * One thread-state packet can carry several states (after a step: `resumed` and
   the new `paused`): read every state `parse_thread_states` returns.
 
+### Watching Extra RDP Resources (WebSocket frames, console, errors)
+
+Firefox's watcher can track resources beyond sources and thread states, such as
+`"websocket"`, `"error-message"`, `"css-message"`, and `"console-message"`.
+Watched types persist across reloads and navigations; `on_resource` automatically
+follows the current target:
+
+```rust
+debugger.watch_resources(&["websocket"]).await?;
+let mut ws_stream = debugger.on_resource("websocket");
+
+while let Some(packet) = ws_stream.next().await {
+    let packet = packet?;
+    for item in parse_resources(&packet, "websocket") {
+        if let Some(msg_type) = item.get("wsMessageType").and_then(|t| t.as_str()) {
+            if let Some(payload) = item.get("data").and_then(|d| d.get("payload")).and_then(|p| p.as_str()) {
+                println!("{msg_type}: frame size = {} bytes", payload.len());
+            }
+        }
+    }
+}
+
+// When done, extra resources can be unwatched individually or all at once via detach():
+debugger.unwatch_resources(&["websocket"])?;
+```
+
 ### Limitations
 
 * **Two ports and two connections.** Without `--start-debugger-server`,

@@ -158,13 +158,17 @@ impl Evaluation {
     }
 }
 
-/// The entries of one resource type in a `resources-available-array` packet.
+/// The entries of one resource type in a resource notification packet.
 ///
-/// Any other packet, or another resource type, yields nothing.
+/// Reads `resources-available-array`, `resources-updated-array`, and
+/// `resources-destroyed-array` packets. Any other packet, or another resource
+/// type, yields nothing.
 pub fn parse_resources(packet: &RdpPacket, resource_type: &str) -> Vec<Value> {
-    // A reply that happens to carry an `array` field is not a resource announcement.
-    if packet.r#type.as_deref() != Some("resources-available-array") {
-        return Vec::new();
+    match packet.r#type.as_deref() {
+        Some(
+            "resources-available-array" | "resources-updated-array" | "resources-destroyed-array",
+        ) => {}
+        _ => return Vec::new(),
     }
     let entries = packet.body.get("array").and_then(Value::as_array);
     entries
@@ -386,6 +390,32 @@ mod tests {
         )
         .expect("a packet");
         assert_eq!(parse_resources(&odd, "source").len(), 1);
+    }
+
+    /// DBG-54: `parse_resources` reads resources from available, updated, and destroyed arrays.
+    #[test]
+    fn parse_resources_reads_available_updated_and_destroyed() {
+        // Given notifications for available, updated, and destroyed arrays
+        for kind in [
+            "resources-available-array",
+            "resources-updated-array",
+            "resources-destroyed-array",
+        ] {
+            let packet = RdpPacket::parse(
+                &json!({
+                    "from": "target1",
+                    "type": kind,
+                    "array": [["websocket", [{"wsMessageType": "frameSent", "data": {"payload": "hello"}}]]],
+                })
+                .to_string(),
+            )
+            .expect("a packet");
+
+            // Then items are extracted regardless of notification flavor
+            let items = parse_resources(&packet, "websocket");
+            assert_eq!(items.len(), 1, "{kind}");
+            assert_eq!(items[0]["wsMessageType"], "frameSent", "{kind}");
+        }
     }
 
     /// DBG-18: `locate` finds the 1-based line and the 0-based column.

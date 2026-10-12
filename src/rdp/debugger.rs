@@ -45,6 +45,7 @@ struct State {
     /// The breakpoints set through this debugger, column resolved, so that
     /// `remove_breakpoint` and `detach` send the same location.
     breakpoints: Vec<BreakpointLocation>,
+    extra_resources: Vec<String>,
 }
 
 type Shared = Arc<RwLock<State>>;
@@ -122,9 +123,9 @@ impl Debugger {
         client
             .request(&watcher, "watchTargets", json!({ "targetType": "frame" }))
             .await?;
-        if let Err(error) = watch_resources(client, &watcher, &mut events, &state).await {
+        if let Err(error) = watch_bootstrap_resources(client, &watcher, &mut events, &state).await {
             // Firefox would otherwise go on announcing this tab's targets for nobody.
-            unwatch(client, &watcher);
+            unwatch(client, &watcher, &[]);
             return Err(error);
         }
         // The reader broadcasts a notification before it routes the reply that
@@ -433,7 +434,13 @@ impl Debugger {
     ///
     /// It detaches every clone: they share the breakpoints and the background task.
     pub async fn detach(self) -> BidiResult<()> {
-        let breakpoints = std::mem::take(&mut write(&self.state).breakpoints);
+        let (breakpoints, extra) = {
+            let mut state = write(&self.state);
+            (
+                std::mem::take(&mut state.breakpoints),
+                std::mem::take(&mut state.extra_resources),
+            )
+        };
         let mut first_error = None;
         for breakpoint in &breakpoints {
             let params = json!({ "location": location_json(breakpoint) });
@@ -450,9 +457,69 @@ impl Debugger {
             }
         }
 
-        unwatch(&self.client, &self.watcher);
+        unwatch(&self.client, &self.watcher, &extra);
         self.follower.0.abort();
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// Watches extra watcher resources (e.g. `"websocket"`, `"error-message"`).
+    ///
+    /// Sends `watchResources` for types not watched yet (no duplicate requests),
+    /// remembering them in the shared state. Watching `"source"` or
+    /// `"thread-state"` again is a no-op.
+    pub async fn watch_resources(&self, types: &[&str]) -> BidiResult<()> {
+        let to_watch = {
+            let state = read(&self.state);
+            filter_types(&state.extra_resources, types, |extra, t| {
+                !extra.iter().any(|k| k == t)
+            })
+        };
+        if to_watch.is_empty() {
+            return Ok(());
+        }
+        let params = json!({ "resourceTypes": to_watch });
+        self.client
+            .request(&self.watcher, "watchResources", params)
+            .await?;
+        let mut state = write(&self.state);
+        for t in to_watch {
+            if !state.extra_resources.iter().any(|k| k == t) {
+                state.extra_resources.push(t.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Stops watching the given extra resources.
+    ///
+    /// Sends a one-way `unwatchResources` for the extra types currently watched.
+    /// `"source"` and `"thread-state"` are never unwatched while the debugger is attached.
+    pub fn unwatch_resources(&self, types: &[&str]) -> BidiResult<()> {
+        let to_unwatch = {
+            let state = read(&self.state);
+            filter_types(&state.extra_resources, types, |extra, t| {
+                extra.iter().any(|k| k == t)
+            })
+        };
+        if to_unwatch.is_empty() {
+            return Ok(());
+        }
+        let params = json!({ "resourceTypes": to_unwatch });
+        self.client
+            .send_oneway(&self.watcher, "unwatchResources", params)?;
+        write(&self.state)
+            .extra_resources
+            .retain(|k| !to_unwatch.contains(&k.as_str()));
+        Ok(())
+    }
+
+    /// All resources currently watched (`"source"`, `"thread-state"`, plus any extra types).
+    pub fn watched_resources(&self) -> Vec<String> {
+        let mut watched =
+            Vec::with_capacity(RESOURCE_TYPES.len() + read(&self.state).extra_resources.len());
+        watched.extend(RESOURCE_TYPES.iter().map(|&s| s.to_string()));
+        watched.extend(read(&self.state).extra_resources.clone());
+        watched
     }
 
     fn target(&self) -> Option<TargetForm> {
@@ -460,7 +527,8 @@ impl Debugger {
     }
 
     /// Resource packets of `resource_type` from the current target.
-    fn on_resource(&self, resource_type: &'static str) -> EventFilter<RdpPacket> {
+    pub fn on_resource(&self, resource_type: impl Into<String>) -> EventFilter<RdpPacket> {
+        let resource_type = resource_type.into();
         let state = Arc::clone(&self.state);
         let watcher = self.watcher.clone();
         EventFilter::with_predicate(self.client.subscribe(), move |packet| {
@@ -472,7 +540,7 @@ impl Debugger {
                 return false;
             }
             from_current_target(&state, packet)
-                && !parse_resources(packet, resource_type).is_empty()
+                && !parse_resources(packet, &resource_type).is_empty()
         })
     }
 
@@ -661,7 +729,7 @@ fn apply(packet: &RdpPacket, watcher: &str, state: &Shared) {
 }
 
 /// Waits for the first top-level target, then watches the sources and thread states.
-async fn watch_resources(
+async fn watch_bootstrap_resources(
     client: &RdpClient,
     watcher: &str,
     events: &mut broadcast::Receiver<RdpPacket>,
@@ -675,10 +743,30 @@ async fn watch_resources(
 
 /// Stops watching resources and targets. Best effort and one-way: Firefox never
 /// answers these, and a dead connection has already dropped the watcher.
-fn unwatch(client: &RdpClient, watcher: &str) {
-    let resources = json!({ "resourceTypes": RESOURCE_TYPES });
+fn unwatch(client: &RdpClient, watcher: &str, extra: &[String]) {
+    let mut all: Vec<&str> = RESOURCE_TYPES.to_vec();
+    all.extend(extra.iter().map(String::as_str));
+    let resources = json!({ "resourceTypes": all });
     let _ = client.send_oneway(watcher, "unwatchResources", resources);
     let _ = client.send_oneway(watcher, "unwatchTargets", json!({ "targetType": "frame" }));
+}
+
+/// Filters `requested` types according to `pred` against currently watched extra types.
+fn filter_types<'a>(
+    extra: &[String],
+    requested: &[&'a str],
+    pred: impl Fn(&[String], &str) -> bool,
+) -> Vec<&'a str> {
+    requested
+        .iter()
+        .copied()
+        .filter(|&t| !RESOURCE_TYPES.contains(&t) && pred(extra, t))
+        .fold(Vec::new(), |mut acc, t| {
+            if !acc.contains(&t) {
+                acc.push(t);
+            }
+            acc
+        })
 }
 
 /// Waits for the first top-level target, applying what arrives meanwhile.
@@ -1722,5 +1810,246 @@ mod tests {
             .expect("open")
             .expect("no lag");
         assert_eq!(parse_sources(&packet)[0].actor, "s2");
+    }
+
+    /// DBG-48: `watch_resources` sends watchResources for new types and deduplicates.
+    #[tokio::test]
+    async fn watch_resources_sends_only_new_types_and_deduplicates() {
+        // Given an attached debugger
+        let (mut server, debugger) = attached(vec![]).await;
+
+        // When watching new resource types
+        debugger
+            .watch_resources(&["websocket", "error-message"])
+            .await
+            .expect("watch");
+
+        // Then watchResources went out with exactly those types
+        let command = server.next_command().await;
+        assert_eq!(command["to"], WATCHER);
+        assert_eq!(command["type"], "watchResources");
+        assert_eq!(
+            command["resourceTypes"],
+            json!(["websocket", "error-message"])
+        );
+
+        // And a second call with an already watched type sends nothing
+        debugger
+            .watch_resources(&["websocket"])
+            .await
+            .expect("second call");
+        server.assert_no_command(QUIET).await;
+
+        // And watching the debugger's built-in types sends nothing
+        debugger
+            .watch_resources(&["source", "thread-state"])
+            .await
+            .expect("builtin types");
+        server.assert_no_command(QUIET).await;
+    }
+
+    /// DBG-49: `on_resource` only yields packets from the current target.
+    #[tokio::test]
+    async fn on_resource_only_yields_this_target() {
+        // Given a filter on websocket resources
+        let (server, debugger) = attached(vec![]).await;
+        let mut ws_stream = debugger.on_resource("websocket");
+
+        // When another target emits a websocket frame and the current target emits one
+        let other = rdp_reply("otherTarget", fixture("rdp/resources-websocket.json"));
+        let current = rdp_reply(TARGET, fixture("rdp/resources-websocket.json"));
+        server.push(other);
+        server.push(current);
+
+        // Then only the current target's packet is yielded
+        let packet = timeout(WAIT, ws_stream.next())
+            .await
+            .expect("a packet")
+            .expect("open")
+            .expect("no lag");
+        assert_eq!(packet.from.as_deref(), Some(TARGET));
+        let frames = parse_resources(&packet, "websocket");
+        assert!(!frames.is_empty());
+        assert_eq!(frames[0]["wsMessageType"], "webSocketOpened");
+    }
+
+    /// DBG-50: `on_resource` follows a target switch immediately.
+    #[tokio::test]
+    async fn on_resource_follows_target_switch_immediately() {
+        // Given a filter on error messages, with background task aborted
+        let (server, debugger) = attached(vec![]).await;
+        let mut errors = debugger.on_resource("error-message");
+        follower_of(&debugger).abort();
+
+        // When a target switch happens followed immediately by the new target's error
+        server.push(new_target("T2", "thread2", "console2"));
+        server.push(rdp_reply("T2", fixture("rdp/resources-error-message.json")));
+
+        // Then the new target's packet is yielded
+        let packet = timeout(WAIT, errors.next())
+            .await
+            .expect("packet on switch")
+            .expect("open")
+            .expect("no lag");
+        assert_eq!(packet.from.as_deref(), Some("T2"));
+        let msgs = parse_resources(&packet, "error-message");
+        assert_eq!(msgs.len(), 2);
+    }
+
+    /// DBG-51: `detach` unwatches every watched type.
+    #[tokio::test]
+    async fn detach_unwatches_every_watched_type() {
+        // Given an attached debugger watching extra resources
+        let (mut server, debugger) = attached(vec![]).await;
+        debugger
+            .watch_resources(&["websocket", "css-message"])
+            .await
+            .expect("watch");
+        server.next_command().await;
+
+        // When detaching
+        timeout(Duration::from_millis(500), debugger.detach())
+            .await
+            .expect("detach timeout")
+            .expect("detached");
+
+        // Then unwatchResources covered built-in and extra types before unwatchTargets
+        let unwatch_res = server.next_command().await;
+        assert_eq!(unwatch_res["to"], WATCHER);
+        assert_eq!(unwatch_res["type"], "unwatchResources");
+        assert_eq!(
+            unwatch_res["resourceTypes"],
+            json!(["source", "thread-state", "websocket", "css-message"])
+        );
+        let unwatch_targets = server.next_command().await;
+        assert_eq!(unwatch_targets["to"], WATCHER);
+        assert_eq!(unwatch_targets["type"], "unwatchTargets");
+    }
+
+    /// DBG-52: `unwatch_resources` sends extra types only.
+    #[tokio::test]
+    async fn unwatch_resources_sends_extra_types_only() {
+        // Given an attached debugger watching websocket
+        let (mut server, debugger) = attached(vec![]).await;
+        debugger
+            .watch_resources(&["websocket"])
+            .await
+            .expect("watch");
+        server.next_command().await;
+
+        // When unwatching websocket and a built-in type
+        debugger
+            .unwatch_resources(&["websocket", "source"])
+            .expect("unwatch");
+
+        // Then only websocket went out in unwatchResources
+        let command = server.next_command().await;
+        assert_eq!(command["to"], WATCHER);
+        assert_eq!(command["type"], "unwatchResources");
+        assert_eq!(command["resourceTypes"], json!(["websocket"]));
+
+        // And unwatching when nothing extra is active sends nothing
+        debugger
+            .unwatch_resources(&["websocket", "source"])
+            .expect("noop");
+        server.assert_no_command(QUIET).await;
+    }
+
+    /// DBG-53: `watched_resources` reflects state across clones.
+    #[tokio::test]
+    async fn watched_resources_reflects_state_across_clones() {
+        // Given an attached debugger and a clone
+        let (mut server, debugger) = attached(vec![]).await;
+        let clone = debugger.clone();
+
+        // Then initial state lists built-in types
+        assert_eq!(debugger.watched_resources(), ["source", "thread-state"]);
+        assert_eq!(clone.watched_resources(), ["source", "thread-state"]);
+
+        // When watching an extra type on clone 1
+        debugger
+            .watch_resources(&["websocket"])
+            .await
+            .expect("watch");
+        server.next_command().await;
+
+        // Then both clones list it
+        assert_eq!(
+            debugger.watched_resources(),
+            ["source", "thread-state", "websocket"]
+        );
+        assert_eq!(
+            clone.watched_resources(),
+            ["source", "thread-state", "websocket"]
+        );
+
+        // When clone 2 unwatches it
+        clone.unwatch_resources(&["websocket"]).expect("unwatch");
+        server.next_command().await;
+
+        // Then both clones no longer list it
+        assert_eq!(debugger.watched_resources(), ["source", "thread-state"]);
+        assert_eq!(clone.watched_resources(), ["source", "thread-state"]);
+    }
+
+    async fn accept_one_ws(listener: tokio::net::TcpListener) {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+            return;
+        };
+        let _ = ws.next().await;
+    }
+
+    /// Real Firefox: a page opening a WebSocket yields websocket resources through `on_resource`.
+    #[tokio::test]
+    #[ignore = "needs a running Firefox on :9222 and :6000 (tests/firefox.sh start)"]
+    async fn real_firefox_watches_websocket_resources() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("port").port();
+        tokio::spawn(accept_one_ws(listener));
+
+        let browser =
+            crate::browser::BrowserClient::connect("127.0.0.1:9222", Duration::from_secs(2))
+                .await
+                .expect("BiDi connect");
+        let rdp = RdpClient::connect("127.0.0.1:6000", Duration::from_secs(2))
+            .await
+            .expect("RDP connect");
+
+        let tab = browser.new_tab("about:blank").await.expect("tab");
+        tab.activate().await.expect("activate");
+        let debugger = Debugger::attach_selected(&rdp).await.expect("attach");
+        debugger
+            .watch_resources(&["websocket"])
+            .await
+            .expect("watch");
+        let mut ws_events = debugger.on_resource("websocket");
+
+        let script = format!("new WebSocket('ws://127.0.0.1:{port}/');");
+        let _ = tab
+            .send_raw_command(
+                "script.evaluate",
+                json!({
+                    "expression": script,
+                    "target": { "context": tab.context_id() },
+                    "awaitPromise": false,
+                }),
+            )
+            .await;
+
+        let packet = timeout(Duration::from_secs(3), ws_events.next())
+            .await
+            .expect("packet")
+            .expect("open")
+            .expect("no lag");
+        assert!(!parse_resources(&packet, "websocket").is_empty());
+
+        let _ = debugger.detach().await;
+        let _ = tab.close().await;
+        let _ = browser.end().await;
     }
 }

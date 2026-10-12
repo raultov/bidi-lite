@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `Debugger::watch_resources`: watch any RDP watcher resource (such as `websocket`,
+  `error-message`, `css-message`) with deduplication; types are remembered in
+  shared state across clones.
+- `Debugger::unwatch_resources`: stop watching specific extra resources with a
+  one-way RDP request without disturbing the debugger's built-in types.
+- `Debugger::watched_resources`: inspect all currently watched resource types.
+- `Debugger::on_resource`: public stream filter for any resource type from the
+  current top-level target, automatically following target switches.
+- `parse_resources`: support reading entries from `resources-available-array`,
+  `resources-updated-array`, and `resources-destroyed-array`.
+- `Debugger::detach`: now unwatches all watched resources (both built-in and extra
+  types) via one-way `unwatchResources` before `unwatchTargets`.
+- Fixtures for `websocket`, `error-message`, and `css-message` captured from real
+  Firefox 157 (`tests/fixtures/rdp/` and `tests/fixtures/SOURCES.md`).
 - CI: pushing a version tag creates its GitHub release, with that version's
   CHANGELOG section as notes, once every check passes on the tag's code.
 
