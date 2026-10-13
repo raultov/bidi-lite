@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Debugger::set_breakpoint_resolved`: sets a breakpoint like `set_breakpoint`
+  and returns a `BoundBreakpoint` with the location sent (the column Firefox
+  binds to) and whether a loaded source has the URL (`resolved`).
+- `Debugger::breakable_column` and `Breakable`: the first breakable column of a
+  line among the loaded sources with a URL, or why there is none.
+
 ### Fixed
+- `Debugger::set_breakpoint` without a column asked only the first loaded source
+  with the URL. A page has one source per inline `<script>`, all with the page's
+  URL, so a line of a later script failed with "has no breakable position". Every
+  source with the URL is now asked.
 - `RdpClient`: the `forwardingCancelled` notification root sends when a debugger
   detaches or its tab closes was taken as the reply to the next request to `root`
   (a `listTabs` or `getProcess` could receive the wrong packet). It is now

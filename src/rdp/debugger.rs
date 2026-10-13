@@ -21,8 +21,9 @@ use tokio::time::{Instant, timeout, timeout_at};
 use tokio_stream::StreamExt;
 
 pub use crate::rdp::resources::{
-    BreakpointLocation, Evaluation, FrameInfo, FrameLocation, PauseOnExceptions, SourceInfo,
-    ThreadState, locate, parse_resources, parse_sources, parse_thread_states,
+    BoundBreakpoint, Breakable, BreakpointLocation, Evaluation, FrameInfo, FrameLocation,
+    PauseOnExceptions, SourceInfo, ThreadState, locate, parse_resources, parse_sources,
+    parse_thread_states,
 };
 
 /// The resources the debugger watches.
@@ -305,36 +306,85 @@ impl Debugger {
     /// Sets a breakpoint, optionally conditional.
     ///
     /// Firefox needs the exact column of a breakable position. With `column: None`
-    /// it is taken from the source, which must then be loaded; a column given by
+    /// it is taken from the loaded sources with that URL (see
+    /// [`Debugger::breakable_column`]), which must then exist; a column given by
     /// the caller needs no source, so a breakpoint can be set before its script
-    /// loads.
+    /// loads. [`Debugger::set_breakpoint_resolved`] also says where it bound.
     pub async fn set_breakpoint(
         &self,
         location: &BreakpointLocation,
         condition: Option<&str>,
     ) -> BidiResult<()> {
-        let resolved = self.resolve(location).await?;
+        self.set_breakpoint_resolved(location, condition).await?;
+        Ok(())
+    }
+
+    /// Sets a breakpoint like [`Debugger::set_breakpoint`] and returns where it
+    /// bound: the location sent, column included, and whether a loaded source
+    /// has the URL (`resolved: false` binds when a script with the URL loads).
+    pub async fn set_breakpoint_resolved(
+        &self,
+        location: &BreakpointLocation,
+        condition: Option<&str>,
+    ) -> BidiResult<BoundBreakpoint> {
+        let bound = self.resolve(location).await?;
         let mut options = json!({});
         if let Some(condition) = condition {
             options["condition"] = json!(condition);
         }
-        let params = json!({ "location": location_json(&resolved), "options": options });
+        let params = json!({ "location": location_json(&bound.location), "options": options });
         self.client
             .request(&self.breakpoint_list, "setBreakpoint", params)
             .await?;
 
         let mut state = write(&self.state);
-        if !state.breakpoints.contains(&resolved) {
-            state.breakpoints.push(resolved);
+        if !state.breakpoints.contains(&bound.location) {
+            state.breakpoints.push(bound.location.clone());
         }
-        Ok(())
+        Ok(bound)
+    }
+
+    /// The first breakable column of `line` (1-based) among the loaded sources
+    /// with `url`: what a column-less breakpoint binds to.
+    ///
+    /// A page has one source per inline `<script>`, all with the page's URL, so
+    /// every one of them is asked (`getBreakpointPositionsCompressed`), in the
+    /// order they were announced, until one has a position on the line.
+    pub async fn breakable_column(&self, url: &str, line: u32) -> BidiResult<Breakable> {
+        let query = json!({ "query": {
+            "start": { "line": line, "column": 0 },
+            "end": { "line": line + 1, "column": 0 },
+        } });
+        let mut found = Breakable::NotLoaded;
+        for source in self
+            .sources()
+            .into_iter()
+            .filter(|source| source.url.as_deref() == Some(url))
+        {
+            found = Breakable::Nowhere;
+            let reply = self
+                .client
+                .request(&source.actor, "getBreakpointPositionsCompressed", &query)
+                .await?;
+            let column = reply.body["positions"][line.to_string()]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .min()
+                .and_then(|column| u32::try_from(column).ok());
+            if let Some(column) = column {
+                return Ok(Breakable::At(column));
+            }
+        }
+        Ok(found)
     }
 
     /// Removes a breakpoint set with [`Debugger::set_breakpoint`].
     pub async fn remove_breakpoint(&self, location: &BreakpointLocation) -> BidiResult<()> {
         let resolved = match self.remembered(location) {
             Some(resolved) => resolved,
-            None => self.resolve(location).await?,
+            None => self.resolve(location).await?.location,
         };
         let params = json!({ "location": location_json(&resolved) });
         self.client
@@ -606,45 +656,35 @@ impl Debugger {
     }
 
     /// `location` with its column; the first breakable position of the line if none is given.
-    async fn resolve(&self, location: &BreakpointLocation) -> BidiResult<BreakpointLocation> {
-        if location.column.is_some() {
-            return Ok(location.clone());
-        }
+    async fn resolve(&self, location: &BreakpointLocation) -> BidiResult<BoundBreakpoint> {
         let url = &location.source_url;
-        let source = self
-            .sources()
-            .into_iter()
-            .find(|source| source.url.as_deref() == Some(url.as_str()))
-            .ok_or_else(|| {
-                invalid_argument(format!(
-                    "no loaded source has the URL {url}; give the column"
-                ))
-            })?;
+        if location.column.is_some() {
+            let resolved = self
+                .sources()
+                .iter()
+                .any(|source| source.url.as_deref() == Some(url.as_str()));
+            return Ok(BoundBreakpoint {
+                location: location.clone(),
+                resolved,
+            });
+        }
 
         let line = location.line;
-        let query = json!({ "query": {
-            "start": { "line": line, "column": 0 },
-            "end": { "line": line + 1, "column": 0 },
-        } });
-        let reply = self
-            .client
-            .request(&source.actor, "getBreakpointPositionsCompressed", query)
-            .await?;
-        let column = reply.body["positions"][line.to_string()]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_u64)
-            .min()
-            .and_then(|column| u32::try_from(column).ok())
-            .ok_or_else(|| {
-                invalid_argument(format!("line {line} of {url} has no breakable position"))
-            })?;
-
-        Ok(BreakpointLocation {
-            column: Some(column),
-            ..location.clone()
-        })
+        match self.breakable_column(url, line).await? {
+            Breakable::At(column) => Ok(BoundBreakpoint {
+                location: BreakpointLocation {
+                    column: Some(column),
+                    ..location.clone()
+                },
+                resolved: true,
+            }),
+            Breakable::NotLoaded => Err(invalid_argument(format!(
+                "no loaded source has the URL {url}; give the column"
+            ))),
+            Breakable::Nowhere => Err(invalid_argument(format!(
+                "line {line} of {url} has no breakable position"
+            ))),
+        }
     }
 }
 
@@ -1470,6 +1510,169 @@ mod tests {
             .await;
         server.assert_no_command(QUIET).await;
         assert!(debugger.state.read().expect("lock").breakpoints.is_empty());
+    }
+
+    /// The second inline script of the page: same URL as the bootstrap source.
+    const SECOND: &str = "server1.conn1.watcher2.process7//source19";
+
+    /// A debugger whose cache holds two sources with the page's URL, answering
+    /// line positions as the two inline scripts of the probe page did.
+    async fn two_inline_scripts() -> (MockServer, Debugger) {
+        let (server, debugger) = attached(vec![
+            (
+                (SOURCE, "getBreakpointPositionsCompressed"),
+                vec![rdp_reply(
+                    SOURCE,
+                    fixture("rdp/breakpoint-positions-inline-none.json"),
+                )],
+            ),
+            (
+                (SECOND, "getBreakpointPositionsCompressed"),
+                vec![rdp_reply(
+                    SECOND,
+                    fixture("rdp/breakpoint-positions-inline-second.json"),
+                )],
+            ),
+        ])
+        .await;
+        server.push(sources_announced(
+            TARGET,
+            json!([{ "actor": SECOND, "url": PAGE, "introductionType": "scriptElement" }]),
+        ));
+        eventually("the second inline script", || debugger.sources().len() == 2).await;
+        (server, debugger)
+    }
+
+    /// DBG-55: `set_breakpoint_resolved` returns the column it bound.
+    #[tokio::test]
+    async fn set_breakpoint_resolved_returns_the_bound_column() {
+        // Given a cached source whose line 7 breaks at column 10
+        let (mut server, debugger) =
+            attached(positions(fixture("rdp/breakpoint-positions.json"))).await;
+
+        // When a breakpoint is set on that line without a column
+        let bound = debugger
+            .set_breakpoint_resolved(&location(PAGE, 7, None), None)
+            .await
+            .expect("set");
+
+        // Then it says where it bound, and that a loaded source has the URL
+        assert_eq!(
+            bound,
+            BoundBreakpoint {
+                location: location(PAGE, 7, Some(10)),
+                resolved: true,
+            }
+        );
+        // And that column is the one the breakpoint list got
+        let set = server.next_command_named("setBreakpoint").await;
+        assert_eq!(set["location"]["column"], 10);
+    }
+
+    /// DBG-56: A line breakable only in a later source with the same URL is found there.
+    #[tokio::test]
+    async fn line_breakable_only_in_a_later_source_of_the_url() {
+        // Given two inline scripts of the page, line 9 being in the second
+        let (mut server, debugger) = two_inline_scripts().await;
+
+        // When a breakpoint is set on line 9 without a column
+        let bound = debugger
+            .set_breakpoint_resolved(&location(PAGE, 9, None), None)
+            .await
+            .expect("set");
+
+        // Then both sources were asked, in cache order
+        for actor in [SOURCE, SECOND] {
+            let query = server.next_command().await;
+            assert_eq!(
+                (query["to"].as_str(), query["type"].as_str()),
+                (Some(actor), Some("getBreakpointPositionsCompressed"))
+            );
+        }
+        // And the second source's column was sent and returned
+        let set = server.next_command().await;
+        assert_eq!(
+            set["location"],
+            json!({ "sourceUrl": PAGE, "line": 9, "column": 2 })
+        );
+        assert_eq!(bound.location, location(PAGE, 9, Some(2)));
+        assert!(bound.resolved);
+    }
+
+    /// DBG-57: A caller's column needs no source, and the result says whether one is loaded.
+    #[tokio::test]
+    async fn callers_column_needs_no_source_and_reports_resolution() {
+        let (mut server, debugger) = attached(vec![]).await;
+
+        // When the URL is not loaded
+        let later = location("https://x/later.js", 3, Some(0));
+        let bound = debugger
+            .set_breakpoint_resolved(&later, None)
+            .await
+            .expect("set");
+        // Then the breakpoint is set as given, with no positions query, and not resolved
+        assert_eq!(server.next_command().await["type"], "setBreakpoint");
+        assert_eq!(
+            bound,
+            BoundBreakpoint {
+                location: later,
+                resolved: false,
+            }
+        );
+
+        // When the URL is loaded
+        let loaded = location(PAGE, 7, Some(10));
+        let bound = debugger
+            .set_breakpoint_resolved(&loaded, None)
+            .await
+            .expect("set");
+        // Then it is resolved, still without a positions query
+        assert_eq!(server.next_command().await["type"], "setBreakpoint");
+        assert!(bound.resolved);
+        assert_eq!(bound.location, loaded);
+    }
+
+    /// DBG-58: `remove_breakpoint` without a column finds the one bound in a later source.
+    #[tokio::test]
+    async fn remove_breakpoint_finds_the_one_bound_in_a_later_source() {
+        // Given the line 9 breakpoint, bound in the second inline script
+        let (mut server, debugger) = two_inline_scripts().await;
+        debugger
+            .set_breakpoint(&location(PAGE, 9, None), None)
+            .await
+            .expect("set");
+        server.next_command_named("setBreakpoint").await;
+
+        // When it is removed with the location the caller passed
+        debugger
+            .remove_breakpoint(&location(PAGE, 9, None))
+            .await
+            .expect("removed");
+
+        // Then the remembered column goes out, with no new positions query
+        let command = server.next_command().await;
+        assert_eq!(command["type"], "removeBreakpoint");
+        assert_eq!(command["location"]["column"], 2);
+    }
+
+    /// DBG-59: `breakable_column` reports `NotLoaded`, `At` and `Nowhere`.
+    #[tokio::test]
+    async fn breakable_column_reports_not_loaded_at_and_nowhere() {
+        // Given the two inline scripts
+        let (mut server, debugger) = two_inline_scripts().await;
+
+        // Then an URL with no source is NotLoaded, and nothing is asked
+        let none = debugger.breakable_column("https://x/later.js", 9).await;
+        assert_eq!(none.expect("answered"), Breakable::NotLoaded);
+        server.assert_no_command(QUIET).await;
+        // And line 9 breaks in the second script
+        let at = debugger.breakable_column(PAGE, 9).await;
+        assert_eq!(at.expect("answered"), Breakable::At(2));
+
+        // And a line no source can break on is Nowhere
+        let (_server, debugger) = attached(positions(json!({ "positions": {} }))).await;
+        let nowhere = debugger.breakable_column(PAGE, 3).await;
+        assert_eq!(nowhere.expect("answered"), Breakable::Nowhere);
     }
 
     /// DBG-27: The source cache skips `debugger eval` sources and sources of other targets.

@@ -52,6 +52,33 @@ impl BreakpointLocation {
     }
 }
 
+/// Where [`Debugger::set_breakpoint_resolved`](crate::rdp::debugger::Debugger::set_breakpoint_resolved)
+/// bound a breakpoint, so a caller can report the column Firefox uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundBreakpoint {
+    /// The location sent to the breakpoint list; its `column` is always `Some`.
+    pub location: BreakpointLocation,
+    /// Whether a loaded source has the URL. `false` means the breakpoint is set
+    /// but binds only when a script with that URL loads.
+    pub resolved: bool,
+}
+
+/// What [`Debugger::breakable_column`](crate::rdp::debugger::Debugger::breakable_column)
+/// found for a line.
+///
+/// A page has one source per inline `<script>`, all with the page's URL, so a
+/// line can be breakable in one of them and not in the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Breakable {
+    /// No loaded source has the URL.
+    NotLoaded,
+    /// The first breakable column of the line, in the first source with the URL
+    /// that has one.
+    At(u32),
+    /// Sources with the URL are loaded, but none can break on that line.
+    Nowhere,
+}
+
 /// When to pause on a thrown exception.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseOnExceptions {

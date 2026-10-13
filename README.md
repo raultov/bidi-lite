@@ -311,7 +311,14 @@ debugger.detach().await?;
 
 * Breakpoints go through the tab's breakpoint list, so they **survive reloads and
   navigations**. Firefox only breaks at exact breakable positions; without a
-  column, `set_breakpoint` takes the first one of the line from the source.
+  column, `set_breakpoint` takes the first one of the line from the loaded
+  sources with that URL. A page has one source per inline `<script>`, all with
+  the page's URL: every one of them is asked.
+* `set_breakpoint_resolved` does the same and returns a `BoundBreakpoint`: the
+  location sent (column included) and `resolved`, `false` when no loaded script
+  has the URL yet (the breakpoint then binds when it loads; this needs a column).
+  `breakable_column(url, line)` answers `Breakable::NotLoaded`, `At(column)` or
+  `Nowhere` without setting anything.
 * Every navigation, reload included, gives the tab a new thread and console
   actor; the debugger follows them.
 * One thread-state packet can carry several states (after a step: `resumed` and
