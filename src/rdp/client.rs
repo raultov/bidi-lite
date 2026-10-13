@@ -14,6 +14,7 @@ use crate::error::{BidiError, BidiResult};
 use crate::event_filter::EventFilter;
 use crate::protocol::NoParams;
 use crate::rdp::protocol::{RdpPacket, encode_request};
+use crate::rdp::resources::Evaluation;
 use crate::transport::{self, Connection, Router, WeakWriter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
+use tokio_stream::StreamExt;
 use tracing::{debug, trace};
 
 /// What the actor queues guard, for the poisoned-lock error.
@@ -74,6 +76,10 @@ pub struct TabDescriptor {
     /// Outer window id. Firefox spells it `outerWindowID`.
     #[serde(default, rename = "outerWindowID")]
     pub outer_window_id: Option<u64>,
+    /// Id of the tab's top-level browsing context, an integer like `browser_id`
+    /// and just as unrelated to the BiDi UUID. Firefox spells it `browsingContextID`.
+    #[serde(default, rename = "browsingContextID")]
+    pub browsing_context_id: Option<u64>,
     /// Whether the tab is the selected one.
     #[serde(default)]
     pub selected: bool,
@@ -90,6 +96,8 @@ pub struct RdpClient {
     event_tx: broadcast::Sender<RdpPacket>,
     greeting: Arc<Value>,
     default_timeout: Duration,
+    /// The parent process's console actor, once asked for (`rdp::context`).
+    pub(crate) parent_console: Arc<Mutex<Option<String>>>,
 }
 
 impl RdpClient {
@@ -138,6 +146,7 @@ impl RdpClient {
             event_tx,
             greeting: Arc::new(greeting.body),
             default_timeout,
+            parent_console: Arc::default(),
         })
     }
 
@@ -219,6 +228,40 @@ impl RdpClient {
             .get("tabs")
             .ok_or_else(|| BidiError::missing_field("listTabs", "tabs"))?;
         Ok(serde_json::from_value(tabs.clone())?)
+    }
+
+    /// `evaluateJSAsync` on `console`, then the `evaluationResult` that carries its
+    /// `resultID`.
+    ///
+    /// The client's timeout applies twice: to the request and then to the
+    /// `evaluationResult` that follows it.
+    pub(crate) async fn evaluate_on(&self, console: &str, params: Value) -> BidiResult<Evaluation> {
+        // Subscribed before sending: the result is a later notification.
+        let mut results = self.on_actor(console);
+        let reply = self.request(console, "evaluateJSAsync", params).await?;
+        let id = reply
+            .str_field("resultID")
+            .ok_or_else(|| BidiError::missing_field("evaluateJSAsync", "resultID"))?
+            .to_string();
+
+        let limit = self.default_timeout;
+        let waiting = async {
+            while let Some(packet) = results.next().await {
+                let packet = packet?;
+                if packet.r#type.as_deref() == Some("evaluationResult")
+                    && packet.str_field("resultID") == Some(id.as_str())
+                {
+                    return Ok(Evaluation::from_packet(&packet));
+                }
+            }
+            Err(BidiError::Disconnected)
+        };
+        timeout(limit, waiting).await.unwrap_or_else(|_| {
+            Err(BidiError::Timeout {
+                method: "evaluationResult".to_string(),
+                timeout: limit,
+            })
+        })
     }
 
     /// The timeout every request of this client is bounded by.
@@ -772,6 +815,33 @@ mod tests {
         assert!(tabs[0].selected);
         assert_eq!(tabs[0].browser_id, Some(2));
         assert_eq!(tabs[0].outer_window_id, Some(24));
+    }
+
+    /// RDP-29: `list_tabs` parses `browsingContextID`.
+    #[tokio::test]
+    async fn list_tabs_parses_browsing_context_id() {
+        // Given the listTabs reply with two tabs on the same URL
+        let reply = vec![rdp_reply("root", fixture("rdp/listTabs-two-tabs.json"))];
+        let server =
+            MockServer::start_rdp(rdp_firefox_like(vec![(("root", "listTabs"), reply)])).await;
+        let client = connected(&server).await;
+
+        // When the tabs are listed
+        let tabs = client.list_tabs().await.expect("tabs");
+
+        // Then each carries its browser id and its browsing context id
+        let ids = tabs
+            .iter()
+            .map(|tab| (tab.browser_id, tab.browsing_context_id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                (Some(2), Some(3)),
+                (Some(11), Some(12)),
+                (Some(12), Some(13))
+            ]
+        );
     }
 
     /// RDP-28: `forwardingCancelled` does not answer a pending root request.

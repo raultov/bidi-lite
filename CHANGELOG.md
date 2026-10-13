@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binds to) and whether a loaded source has the URL (`resolved`).
 - `Debugger::breakable_column` and `Breakable`: the first breakable column of a
   line among the loaded sources with a URL, or why there is none.
+- `RdpClient::tab_for_context` and `RdpClient::browser_id_of_context` (new module
+  `rdp::context`): the RDP tab descriptor of a BiDi browsing context, matched by
+  `browserId` through the Remote Agent's `NavigableManager` in the parent
+  process. Tabs on the same URL are told apart and no tab is activated. `None`
+  when no tab shows the context.
+- `Debugger::attach_to_context`: attaches to the tab of a BiDi context; fails
+  with `no such frame` when no tab shows it.
+- `TabDescriptor::browsing_context_id` (`browsingContextID` of `listTabs`).
 
 ### Fixed
 - `Debugger::set_breakpoint` without a column asked only the first loaded source

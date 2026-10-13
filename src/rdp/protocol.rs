@@ -6,6 +6,7 @@
 //! fields routing needs, so a field Firefox adds never breaks parsing.
 
 use crate::error::{BidiError, BidiResult};
+use crate::protocol::str_at;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -80,6 +81,14 @@ impl RdpPacket {
     pub fn str_field(&self, field: &str) -> Option<&str> {
         self.body.get(field)?.as_str()
     }
+}
+
+/// The actor at `path` in the reply to `method`, or the missing-field error
+/// naming both: the replies that hand out actors are read this way.
+pub(crate) fn actor_in(packet: RdpPacket, path: &[&str], method: &str) -> BidiResult<String> {
+    str_at(&packet.body, path)
+        .map(str::to_string)
+        .ok_or_else(|| BidiError::missing_field(method, &path.join(".")))
 }
 
 /// Builds `{"to": to, "type": method, ..params}`.

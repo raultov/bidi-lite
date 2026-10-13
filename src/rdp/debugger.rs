@@ -10,15 +10,14 @@ use crate::error::{BidiError, BidiResult, codes};
 use crate::event_filter::EventFilter;
 use crate::protocol::{NoParams, str_at};
 use crate::rdp::client::{RdpClient, TabDescriptor};
-use crate::rdp::protocol::RdpPacket;
+use crate::rdp::protocol::{RdpPacket, actor_in};
 use serde_json::{Value, json};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::task::AbortHandle;
-use tokio::time::{Instant, timeout, timeout_at};
-use tokio_stream::StreamExt;
+use tokio::time::{Instant, timeout_at};
 
 pub use crate::rdp::resources::{
     BoundBreakpoint, Breakable, BreakpointLocation, Evaluation, FrameInfo, FrameLocation,
@@ -170,6 +169,26 @@ impl Debugger {
             .find(|tab| tab.selected)
             .ok_or_else(|| BidiError::InternalError("no tab is selected".to_string()))?;
         Self::attach(client, tab).await
+    }
+
+    /// Attaches to the tab showing the BiDi top-level browsing context `context`
+    /// (a [`Tab`](crate::tab::Tab)'s `context_id()`).
+    ///
+    /// The tab is found with [`RdpClient::tab_for_context`]: by `browserId`, so
+    /// tabs showing the same URL are told apart, and without activating the tab.
+    /// Fails with a `no such frame` [`BidiError::ProtocolError`] when no tab
+    /// shows the context (closed, unknown, or an iframe), before attaching.
+    pub async fn attach_to_context(client: &RdpClient, context: &str) -> BidiResult<Self> {
+        let tab =
+            client
+                .tab_for_context(context)
+                .await?
+                .ok_or_else(|| BidiError::ProtocolError {
+                    error: codes::NO_SUCH_FRAME.to_string(),
+                    message: format!("no tab shows the browsing context {context}"),
+                    stacktrace: None,
+                })?;
+        Self::attach(client, &tab).await
     }
 
     /// The connection, for requests this type does not wrap.
@@ -606,38 +625,9 @@ impl Debugger {
             .await
     }
 
-    /// `evaluateJSAsync`, then the `evaluationResult` that carries its `resultID`.
+    /// `evaluateJSAsync` on the current target's console.
     async fn evaluate_with(&self, params: Value) -> BidiResult<Evaluation> {
-        let console = self.console_actor();
-        // Subscribed before sending: the result is a later notification.
-        let mut results = self.client.on_actor(&console);
-        let reply = self
-            .client
-            .request(&console, "evaluateJSAsync", params)
-            .await?;
-        let id = reply
-            .str_field("resultID")
-            .ok_or_else(|| BidiError::missing_field("evaluateJSAsync", "resultID"))?
-            .to_string();
-
-        let limit = self.client.default_timeout();
-        let waiting = async {
-            while let Some(packet) = results.next().await {
-                let packet = packet?;
-                if packet.r#type.as_deref() == Some("evaluationResult")
-                    && packet.str_field("resultID") == Some(id.as_str())
-                {
-                    return Ok(Evaluation::from_packet(&packet));
-                }
-            }
-            Err(BidiError::Disconnected)
-        };
-        timeout(limit, waiting).await.unwrap_or_else(|_| {
-            Err(BidiError::Timeout {
-                method: "evaluationResult".to_string(),
-                timeout: limit,
-            })
-        })
+        self.client.evaluate_on(&self.console_actor(), params).await
     }
 
     /// A breakpoint set earlier for the same place, when the caller gives no column.
@@ -690,23 +680,12 @@ impl Debugger {
 
 /// The error for a request the debugger refuses before sending it.
 fn invalid_argument(message: String) -> BidiError {
-    BidiError::ProtocolError {
-        error: codes::INVALID_ARGUMENT.to_string(),
-        message,
-        stacktrace: None,
-    }
+    BidiError::refused(codes::INVALID_ARGUMENT, message)
 }
 
 /// `{sourceUrl, line, column}` as the breakpoint list expects it.
 fn location_json(location: &BreakpointLocation) -> Value {
     json!({ "sourceUrl": location.source_url, "line": location.line, "column": location.column })
-}
-
-/// The actor at `path` in a bootstrap reply.
-fn actor_in(packet: RdpPacket, path: &[&str], method: &str) -> BidiResult<String> {
-    str_at(&packet.body, path)
-        .map(str::to_string)
-        .ok_or_else(|| BidiError::missing_field(method, &path.join(".")))
 }
 
 /// Whether `packet` was sent by the current top-level target.
@@ -860,7 +839,10 @@ async fn follow(mut events: broadcast::Receiver<RdpPacket>, watcher: String, sta
 mod tests {
     use super::*;
     use crate::error::BidiError;
-    use crate::test_support::{MockServer, RdpOverride, fixture, rdp_firefox_like, rdp_reply};
+    use crate::test_support::{
+        MockServer, RdpOverride, fixture, rdp_context_lookup, rdp_firefox_like, rdp_lookup_answers,
+        rdp_reply,
+    };
     use serde_json::json;
     use std::time::Duration;
     use tokio::time::{Instant, sleep, timeout};
@@ -1673,6 +1655,108 @@ mod tests {
         let (_server, debugger) = attached(positions(json!({ "positions": {} }))).await;
         let nowhere = debugger.breakable_column(PAGE, 3).await;
         assert_eq!(nowhere.expect("answered"), Breakable::Nowhere);
+    }
+
+    /// The third tab of `rdp/listTabs-two-tabs.json` (browserId 12) in BiDi.
+    const CONTEXT: &str = "dcd31f9a-26fa-449e-bad3-efcdcbb7980d";
+
+    /// DBG-60: `attach_to_context` attaches to the descriptor of the context without activating it.
+    #[tokio::test]
+    async fn attach_to_context_attaches_to_its_descriptor() {
+        // Given a Firefox whose lookup says the context is in the tab with browserId 12,
+        // and an RDP client only: no BiDi connection exists to activate anything with
+        let lookup = rdp_lookup_answers(fixture("rdp/browser-id-lookup.json"));
+        let mut server = MockServer::start_rdp(rdp_firefox_like(rdp_context_lookup(lookup))).await;
+        let client = client_for(&server, TIMEOUT).await;
+
+        // When the debugger attaches to the context
+        let debugger = Debugger::attach_to_context(&client, CONTEXT)
+            .await
+            .expect("attach");
+
+        // Then the watcher was asked of that tab's descriptor, not of the selected one
+        let get_watcher = server.next_command_named("getWatcher").await;
+        assert_eq!(get_watcher["to"], "server1.conn0.tabDescriptor3");
+        assert_eq!(debugger.thread_actor(), THREAD);
+    }
+
+    /// DBG-61: `attach_to_context` with a context no tab shows fails before attaching.
+    #[tokio::test]
+    async fn attach_to_context_without_a_tab_fails_before_attaching() {
+        // Given a lookup that finds no tab
+        let lookup = rdp_lookup_answers(fixture("rdp/browser-id-lookup-null.json"));
+        let mut server = MockServer::start_rdp(rdp_firefox_like(rdp_context_lookup(lookup))).await;
+        let client = client_for(&server, TIMEOUT).await;
+
+        // Then attaching fails with no such frame, naming the context
+        let error = failure(Debugger::attach_to_context(&client, "gone-context").await);
+        assert!(
+            matches!(&error, BidiError::ProtocolError { error, message, .. }
+                if error == "no such frame" && message.contains("gone-context")),
+            "{error:?}"
+        );
+        // And no watcher was asked for
+        for _ in 0..3 {
+            assert_ne!(server.next_command().await["type"], "getWatcher");
+        }
+        server.assert_no_command(QUIET).await;
+    }
+
+    /// DBG-62: Real Firefox: every context of two windows maps to its own tab.
+    #[tokio::test]
+    #[ignore = "needs a running Firefox on :9222 and :6000 (tests/firefox.sh start)"]
+    async fn real_firefox_maps_every_context_to_its_tab() {
+        let limit = Duration::from_secs(5);
+        let browser = crate::browser::BrowserClient::connect("127.0.0.1:9222", limit)
+            .await
+            .expect("BiDi connect");
+        let rdp = RdpClient::connect("127.0.0.1:6000", limit)
+            .await
+            .expect("RDP connect");
+
+        // Given three tabs in two windows, two of them on the same page
+        let page = "https://example.com/";
+        let first = browser.new_tab(page).await.expect("tab");
+        let second = browser.new_tab(page).await.expect("tab");
+        let window = browser
+            .client()
+            .send_raw_command("browsingContext.create", json!({ "type": "window" }))
+            .await
+            .expect("window");
+        let third = window
+            .result_str("context")
+            .expect("window context")
+            .to_string();
+        let third = browser.attach(&third).await.expect("attach");
+        third
+            .navigate(page, crate::browser::ReadinessState::Complete)
+            .await
+            .expect("navigate");
+        let tabs = [first, second, third];
+
+        // When each context marks its page with its own id, and each is read back through RDP
+        let mut seen = Vec::new();
+        for tab in &tabs {
+            let id = tab.context_id();
+            let mark = json!({ "expression": format!("window.name = {id:?}"),
+                "target": tab.script_target(), "awaitPromise": false });
+            tab.send_raw_command("script.evaluate", mark)
+                .await
+                .expect("marked");
+            let debugger = Debugger::attach_to_context(&rdp, id).await.expect("attach");
+            let name = debugger.evaluate("window.name").await.expect("evaluated");
+            seen.push((id.to_string(), name.result));
+            let _ = debugger.detach().await;
+        }
+
+        // Then every page carried its own context id
+        for tab in tabs {
+            let _ = tab.close().await;
+        }
+        let _ = browser.end().await;
+        for (id, name) in seen {
+            assert_eq!(name, json!(id));
+        }
     }
 
     /// DBG-27: The source cache skips `debugger eval` sources and sources of other targets.

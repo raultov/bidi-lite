@@ -142,6 +142,17 @@ impl BidiError {
         ))
     }
 
+    /// A [`BidiError::ProtocolError`] the library raises itself, with a protocol
+    /// `code`: a request it refuses before sending, or an answer it cannot use.
+    /// Callers match it like the browser's own errors.
+    pub(crate) fn refused(code: &str, message: String) -> Self {
+        Self::ProtocolError {
+            error: code.to_string(),
+            message,
+            stacktrace: None,
+        }
+    }
+
     /// The error for a reply that lacks a field the library depends on.
     ///
     /// An [`InternalError`](BidiError::InternalError) rather than a protocol

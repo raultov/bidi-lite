@@ -327,6 +327,50 @@ pub(crate) fn rdp_reply(from: &str, mut body: Value) -> Value {
     body
 }
 
+/// The parent process descriptor of `rdp/get-process.json`.
+pub(crate) const PARENT_PROCESS: &str = "server1.conn0.processDescriptor4";
+/// The parent process console of `rdp/parent-process-target.json`.
+pub(crate) const PARENT_CONSOLE: &str = "server1.conn0.consoleActor7";
+
+/// The parent console's answers to an evaluation: `{resultID}`, then `result`
+/// (an `evaluationResult`) re-addressed to come from that console.
+pub(crate) fn rdp_lookup_answers(mut result: Value) -> Vec<Value> {
+    result["from"] = json!(PARENT_CONSOLE);
+    let id = result["resultID"].clone();
+    vec![rdp_reply(PARENT_CONSOLE, json!({ "resultID": id })), result]
+}
+
+/// The captured browser-id lookup (`rdp/browser-id-lookup.json`), answering `id`.
+pub(crate) fn rdp_browser_id(id: u64) -> Value {
+    let mut result = fixture("rdp/browser-id-lookup.json");
+    result["result"] = json!(id);
+    result
+}
+
+/// What a Firefox answers to find a BiDi context's tab: the parent process
+/// (`getProcess`, `getTarget`), its console answering `lookup`, and the two-tab
+/// `listTabs` captured in the same session.
+pub(crate) fn rdp_context_lookup(lookup: Vec<Value>) -> Vec<RdpOverride> {
+    vec![
+        (
+            ("root", "getProcess"),
+            vec![rdp_reply("root", fixture("rdp/get-process.json"))],
+        ),
+        (
+            (PARENT_PROCESS, "getTarget"),
+            vec![rdp_reply(
+                PARENT_PROCESS,
+                fixture("rdp/parent-process-target.json"),
+            )],
+        ),
+        ((PARENT_CONSOLE, "evaluateJSAsync"), lookup),
+        (
+            ("root", "listTabs"),
+            vec![rdp_reply("root", fixture("rdp/listTabs-two-tabs.json"))],
+        ),
+    ]
+}
+
 /// Real messages captured by the spike (`tests/fixtures/`), by relative name.
 const FIXTURES: &[(&str, &str)] = &[
     (

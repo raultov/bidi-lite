@@ -300,7 +300,8 @@ Firefox refuses to start the DevTools server unless the first two are `true`.
 
 ```rust
 let rdp = RdpClient::connect("127.0.0.1:6000", Duration::from_secs(10)).await?;
-let debugger = Debugger::attach_selected(&rdp).await?;
+// `tab` is the `Tab` driven over BiDi; it is not activated.
+let debugger = Debugger::attach_to_context(&rdp, tab.context_id()).await?;
 if let Some((_, location)) = debugger.find_in_sources("nav_dropdown.value").await? {
     debugger.set_breakpoint(&location, None).await?;
 }
@@ -356,9 +357,14 @@ debugger.unwatch_resources(&["websocket"])?;
   `RdpClient::connect` fails with a WebSocket error.
 * **RDP is not a standard.** It can change between Firefox versions; this crate
   is validated against Firefox 157, and `make e2e` re-checks it.
-* **Finding the tab.** BiDi and RDP name tabs differently. Activate the tab and
-  use `Debugger::attach_selected`; `attach_by_url` takes the *first* tab whose URL
-  matches, which may be another one showing the same page.
+* **Finding the tab.** BiDi and RDP name tabs differently (a UUID, an actor) and
+  share no id on the wire. `Debugger::attach_to_context` and
+  `RdpClient::tab_for_context` ask Firefox's Remote Agent, in the parent process,
+  for the `browserId` of the BiDi context and pick the descriptor with it: tabs
+  on the same URL are told apart and no tab is activated. This needs
+  `devtools.chrome.enabled` (already required above), works for top-level
+  contexts only, and is validated on Firefox 157. `attach_selected` (the
+  selected tab) and `attach_by_url` (the *first* tab whose URL matches) remain.
 * **Iframes:** only the tab's top-level document is followed.
 * **Requests to the same RDP actor are serialised**, and one that is never
   answered blocks its actor's queue until the connection is replaced.
