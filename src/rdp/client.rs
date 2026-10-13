@@ -774,6 +774,25 @@ mod tests {
         assert_eq!(tabs[0].outer_window_id, Some(24));
     }
 
+    /// RDP-28: `forwardingCancelled` does not answer a pending root request.
+    #[tokio::test]
+    async fn forwarding_cancelled_does_not_answer_a_root_request() {
+        // Given a pending listTabs
+        let mut server = MockServer::start_rdp(silent()).await;
+        let client = connected(&server).await;
+        let listing = client.clone();
+        let pending = tokio::spawn(async move { listing.list_tabs().await });
+        server.next_command().await;
+
+        // When root announces a cancelled forwarding and then answers
+        server.push(fixture("rdp/forwarding-cancelled.json"));
+        server.push(rdp_reply("root", fixture("rdp/listTabs-two-tabs.json")));
+
+        // Then list_tabs gets the tabs of the reply
+        let tabs = pending.await.expect("joined").expect("tabs");
+        assert_eq!(tabs.len(), 3);
+    }
+
     /// RDP-15: Unparsable frames are discarded and the connection survives.
     #[tokio::test]
     async fn unparsable_rdp_frame_is_discarded() {

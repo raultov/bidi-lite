@@ -28,6 +28,9 @@ pub const UNSOLICITED_TYPES: &[&str] = &[
     "tabListChanged",
     "workerListChanged",
     "descriptor-destroyed",
+    // Root sends it when a watcher's forwarding to a content process ends (a
+    // debugger detached, a tab closed), unasked and in between root replies.
+    "forwardingCancelled",
 ];
 
 /// Any packet the server sends: greeting, reply, error or notification.
@@ -214,5 +217,16 @@ mod tests {
         assert_eq!(failure.error.as_deref(), Some("wrongState"));
         assert_eq!(failure.message.as_deref(), Some("not paused"));
         assert!(!packet_from("rdp/listTabs.json").is_error());
+    }
+
+    /// RDP-27: `forwardingCancelled` is a notification.
+    #[test]
+    fn forwarding_cancelled_is_a_notification() {
+        // Given the packet root sent after a debugger detached and its tab closed
+        let packet = packet_from("rdp/forwarding-cancelled.json");
+
+        // Then it is a notification, never a reply
+        assert_eq!(packet.from.as_deref(), Some("root"));
+        assert!(packet.is_notification());
     }
 }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `RdpClient`: the `forwardingCancelled` notification root sends when a debugger
+  detaches or its tab closes was taken as the reply to the next request to `root`
+  (a `listTabs` or `getProcess` could receive the wrong packet). It is now
+  recognised as a notification (`UNSOLICITED_TYPES`).
+
 ## [0.1.2] - 2026-10-12
 
 ### Added
