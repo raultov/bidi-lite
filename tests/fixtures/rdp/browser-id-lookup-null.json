@@ -1,0 +1,12 @@
+{
+  "from": "server1.conn0.consoleActor25",
+  "hasException": false,
+  "input": "(() => { const { NavigableManager } = ChromeUtils.importESModule(\"chrome://remote/content/shared/NavigableManager.sys.mjs\"); const bc = NavigableManager.getBrowsingContextById(\"00000000-0000-0000-0000-000000000000\"); return bc ? bc.browserId : null; })()",
+  "result": {
+    "type": "null"
+  },
+  "resultID": "1791924055156.38-0",
+  "startTime": 1791924055156.38,
+  "timestamp": 1791924055157.126,
+  "type": "evaluationResult"
+}

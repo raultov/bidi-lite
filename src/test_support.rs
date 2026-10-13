@@ -338,6 +338,10 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/bidi/event-log-entry.json"),
     ),
     (
+        "bidi/get-tree-two-tabs.json",
+        include_str!("../tests/fixtures/bidi/get-tree-two-tabs.json"),
+    ),
+    (
         "bidi/get-tree.json",
         include_str!("../tests/fixtures/bidi/get-tree.json"),
     ),
@@ -354,8 +358,24 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/bidi/session-status-busy.json"),
     ),
     (
+        "rdp/breakpoint-positions-inline-none.json",
+        include_str!("../tests/fixtures/rdp/breakpoint-positions-inline-none.json"),
+    ),
+    (
+        "rdp/breakpoint-positions-inline-second.json",
+        include_str!("../tests/fixtures/rdp/breakpoint-positions-inline-second.json"),
+    ),
+    (
         "rdp/breakpoint-positions.json",
         include_str!("../tests/fixtures/rdp/breakpoint-positions.json"),
+    ),
+    (
+        "rdp/browser-id-lookup-null.json",
+        include_str!("../tests/fixtures/rdp/browser-id-lookup-null.json"),
+    ),
+    (
+        "rdp/browser-id-lookup.json",
+        include_str!("../tests/fixtures/rdp/browser-id-lookup.json"),
     ),
     (
         "rdp/evaluate-reply.json",
@@ -366,8 +386,16 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/rdp/evaluation-result.json"),
     ),
     (
+        "rdp/forwarding-cancelled.json",
+        include_str!("../tests/fixtures/rdp/forwarding-cancelled.json"),
+    ),
+    (
         "rdp/frames.json",
         include_str!("../tests/fixtures/rdp/frames.json"),
+    ),
+    (
+        "rdp/get-process.json",
+        include_str!("../tests/fixtures/rdp/get-process.json"),
     ),
     (
         "rdp/getWatcher.json",
@@ -378,8 +406,16 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/rdp/greeting.json"),
     ),
     (
+        "rdp/listTabs-two-tabs.json",
+        include_str!("../tests/fixtures/rdp/listTabs-two-tabs.json"),
+    ),
+    (
         "rdp/listTabs.json",
         include_str!("../tests/fixtures/rdp/listTabs.json"),
+    ),
+    (
+        "rdp/parent-process-target.json",
+        include_str!("../tests/fixtures/rdp/parent-process-target.json"),
     ),
     (
         "rdp/resources-css-message.json",

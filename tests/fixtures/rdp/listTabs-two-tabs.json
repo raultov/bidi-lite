@@ -1,0 +1,50 @@
+{
+  "from": "root",
+  "tabs": [
+    {
+      "actor": "server1.conn0.tabDescriptor1",
+      "browserId": 2,
+      "browsingContextID": 3,
+      "isZombieTab": false,
+      "outerWindowID": 6,
+      "selected": false,
+      "title": "New Tab",
+      "traits": {
+        "supportsNavigation": true,
+        "supportsReloadDescriptor": true,
+        "watcher": true
+      },
+      "url": "about:home"
+    },
+    {
+      "actor": "server1.conn0.tabDescriptor2",
+      "browserId": 11,
+      "browsingContextID": 12,
+      "isZombieTab": false,
+      "outerWindowID": 26,
+      "selected": false,
+      "title": "inline",
+      "traits": {
+        "supportsNavigation": true,
+        "supportsReloadDescriptor": true,
+        "watcher": true
+      },
+      "url": "http://127.0.0.1:44223/inline"
+    },
+    {
+      "actor": "server1.conn0.tabDescriptor3",
+      "browserId": 12,
+      "browsingContextID": 13,
+      "isZombieTab": false,
+      "outerWindowID": 30,
+      "selected": true,
+      "title": "inline",
+      "traits": {
+        "supportsNavigation": true,
+        "supportsReloadDescriptor": true,
+        "watcher": true
+      },
+      "url": "http://127.0.0.1:44223/inline"
+    }
+  ]
+}

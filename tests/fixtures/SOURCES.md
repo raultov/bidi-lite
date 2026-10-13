@@ -11,6 +11,8 @@ Captured from Firefox 157.0.1 on Ubuntu 24.04 (Phase 1 spike and Phase 10 smoke 
 - `session-status-busy.json`: `session.status` returning `ready: false`.
 - `event-load.json`: `browsingContext.load` event.
 - `event-log-entry.json`: `log.entryAdded` event from a page console log.
+- `get-tree-two-tabs.json` (0.1.3): `browsingContext.getTree { maxDepth: 0 }` with `about:home` and two
+  tabs on the same local URL (`/inline`). `id` set to 0 (re-addressed by `fixture_for`).
 
 ## Firefox RDP (`tests/fixtures/rdp/`)
 
@@ -39,3 +41,18 @@ Captured from Firefox 157.0.1 on Ubuntu 24.04 (`--start-debugger-server ws:6000`
 - `resources-css-message.json`: `resources-available-array` carrying `css-message` resources
   (CSS Parser warnings: unknown property and invalid value).
   Captured from stylesheet parsing on http://127.0.0.1:8809/.
+
+Captured in the 0.1.3 probe (PROMPT-02, Firefox 157.0.1, visible window), the same session as
+`bidi/get-tree-two-tabs.json`:
+- `listTabs-two-tabs.json`: `listTabs` with the same three tabs (`browserId` 2/11/12,
+  `browsingContextID` 3/12/13).
+- `get-process.json`: reply from `root` to `getProcess { id: 0 }` (the parent process descriptor).
+- `parent-process-target.json`: reply from the process descriptor to `getTarget` (its `consoleActor`).
+- `browser-id-lookup.json`: `evaluationResult` of the `NavigableManager` lookup of the third tab
+  (`result: 12`).
+- `browser-id-lookup-null.json`: the same lookup for an unknown context (`result: {type: "null"}`).
+- `breakpoint-positions-inline-none.json` / `breakpoint-positions-inline-second.json`: replies to
+  `getBreakpointPositionsCompressed` for line 9 of a page with two inline `<script>` blocks, from the
+  first source (`{}`) and the second (`{"9": [2]}`).
+- `forwarding-cancelled.json`: `forwardingCancelled` notification from `root` after a debugger
+  detached and its tab closed.

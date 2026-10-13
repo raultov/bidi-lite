@@ -1,0 +1,35 @@
+{
+  "type": "success",
+  "id": 0,
+  "result": {
+    "contexts": [
+      {
+        "children": null,
+        "clientWindow": "6ce45d8b-2998-4e15-b03f-192e4f35e70e",
+        "context": "8f3e8781-7068-4406-9265-5b44a614fc08",
+        "originalOpener": null,
+        "parent": null,
+        "url": "about:home",
+        "userContext": "default"
+      },
+      {
+        "children": null,
+        "clientWindow": "6ce45d8b-2998-4e15-b03f-192e4f35e70e",
+        "context": "d1eb58bc-af1a-40c3-8927-b82c5382dd9f",
+        "originalOpener": null,
+        "parent": null,
+        "url": "http://127.0.0.1:44223/inline",
+        "userContext": "default"
+      },
+      {
+        "children": null,
+        "clientWindow": "6ce45d8b-2998-4e15-b03f-192e4f35e70e",
+        "context": "dcd31f9a-26fa-449e-bad3-efcdcbb7980d",
+        "originalOpener": null,
+        "parent": null,
+        "url": "http://127.0.0.1:44223/inline",
+        "userContext": "default"
+      }
+    ]
+  }
+}

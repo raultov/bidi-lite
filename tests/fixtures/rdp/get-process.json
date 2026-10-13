@@ -1,0 +1,13 @@
+{
+  "from": "root",
+  "processDescriptor": {
+    "actor": "server1.conn0.processDescriptor4",
+    "id": 0,
+    "isParent": true,
+    "isWindowlessParent": false,
+    "traits": {
+      "supportsReloadDescriptor": true,
+      "watcher": true
+    }
+  }
+}
