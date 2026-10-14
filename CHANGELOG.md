@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-14
+
 ### Added
 - `Debugger::set_breakpoint_resolved`: sets a breakpoint like `set_breakpoint`
   and returns a `BoundBreakpoint` with the location sent (the column Firefox
