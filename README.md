@@ -108,6 +108,14 @@ connection's event stream: without the subscription it stays silent forever.
   for `log.entryAdded`). **Iframes** are browsing contexts of their own, so their
   events do not reach the filter of the tab that contains them.
 
+### Large messages
+
+A connection (BiDi or RDP) accepts WebSocket messages up to
+`client::MAX_MESSAGE_SIZE` (256 MiB, as `cdp-lite`). Firefox sends each message
+in one frame, and the WebSocket library's default 16 MiB frame limit used to
+close the connection on a larger reply (a huge `script.evaluate` result, a big
+page or source).
+
 ### Event loss and `BidiError::Lagged`
 
 One connection carries the events of every module of every tab through a single

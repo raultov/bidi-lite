@@ -31,6 +31,15 @@ pub use crate::session::{SessionInfo, SessionStatus, default_capabilities};
 /// session drives many tabs at once.
 pub const EVENT_CHANNEL_CAPACITY: usize = 4096;
 
+/// Largest WebSocket message (and frame) a connection accepts: 256 MiB.
+///
+/// Firefox sends each message in a single frame, so tungstenite's default
+/// 16 MiB frame limit closed the connection on any larger reply (a huge
+/// `script.evaluate` result, a big page or source), and every later command
+/// failed with `Disconnected`. Same limit as `cdp-lite`. Applies to the RDP
+/// connection too.
+pub const MAX_MESSAGE_SIZE: usize = 256 << 20;
+
 /// Commands awaiting the reply that carries their `id`.
 ///
 /// One map per connection, shared with the reader task: every tab's replies

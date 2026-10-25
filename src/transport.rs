@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 use tracing::{debug, error, trace};
 
 pub(crate) type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -107,8 +108,17 @@ pub(crate) async fn open_with<R: Router>(
     url: &str,
     build: impl FnOnce(&Connection) -> R,
 ) -> BidiResult<Connection> {
-    let (socket, _) = connect_async(url).await?;
+    let (socket, _) = connect_async_with_config(url, Some(websocket_config()), false).await?;
     Ok(spawn(socket, build))
+}
+
+/// The WebSocket settings of every connection (see
+/// [`MAX_MESSAGE_SIZE`](crate::client::MAX_MESSAGE_SIZE)).
+fn websocket_config() -> WebSocketConfig {
+    let max = crate::client::MAX_MESSAGE_SIZE;
+    WebSocketConfig::default()
+        .max_message_size(Some(max))
+        .max_frame_size(Some(max))
 }
 
 /// Spawns the writer task and the reader loop over an open socket.
@@ -291,6 +301,29 @@ mod tests {
             seen.push(next_frame(&mut probe).await);
         }
         assert_eq!(seen, ["a", "b", "c"]);
+    }
+
+    /// TRN-10: A frame over tungstenite's default 16 MiB limit (a huge
+    /// `script.evaluate` result) reaches the router instead of closing the
+    /// connection.
+    #[tokio::test]
+    async fn frame_over_16_mib_reaches_router() {
+        // Given a connection to a mock server
+        let server = MockServer::start(silent()).await;
+        let (router, mut probe) = recording_router();
+        let connection = open(&server.ws_url(), router).await.expect("connect");
+
+        // When the server pushes a 20 MiB frame
+        let big = "x".repeat(20 << 20);
+        server.push_raw(&big);
+
+        // Then the router gets it whole and the connection stays alive
+        let frame = timeout(Duration::from_secs(10), probe.frames.recv())
+            .await
+            .expect("no frame within 10 s")
+            .expect("the router was dropped");
+        assert_eq!(frame.len(), 20 << 20);
+        assert!(connection.is_alive.load(Ordering::SeqCst));
     }
 
     /// TRN-02: A closed socket marks the connection dead and calls `on_disconnect` once.
