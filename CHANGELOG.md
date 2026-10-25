@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-25
+
+### Added
+- `client::MAX_MESSAGE_SIZE` (256 MiB), the largest message a connection
+  accepts.
+
+### Fixed
+- A message over 16 MiB (a huge `script.evaluate` result, a big page or source)
+  closed the connection: tungstenite's default frame limit is 16 MiB and Firefox
+  sends each message in one frame, so the reply never arrived and every later
+  command failed with `Disconnected`. BiDi and RDP connections now accept
+  messages and frames up to 256 MiB.
+
 ## [0.1.3] - 2026-10-14
 
 ### Added
