@@ -402,6 +402,22 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/bidi/session-status-busy.json"),
     ),
     (
+        "rdp/frame-resources-sources.json",
+        include_str!("../tests/fixtures/rdp/frame-resources-sources.json"),
+    ),
+    (
+        "rdp/frame-resources-thread-state-paused.json",
+        include_str!("../tests/fixtures/rdp/frame-resources-thread-state-paused.json"),
+    ),
+    (
+        "rdp/frame-target-available.json",
+        include_str!("../tests/fixtures/rdp/frame-target-available.json"),
+    ),
+    (
+        "rdp/frame-target-destroyed.json",
+        include_str!("../tests/fixtures/rdp/frame-target-destroyed.json"),
+    ),
+    (
         "rdp/breakpoint-positions-inline-none.json",
         include_str!("../tests/fixtures/rdp/breakpoint-positions-inline-none.json"),
     ),

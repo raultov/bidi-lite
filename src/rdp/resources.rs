@@ -26,6 +26,49 @@ pub struct SourceInfo {
     pub introduction_type: Option<String>,
 }
 
+/// A frame of the tab with a target of its own: an iframe of another
+/// origin, which Firefox runs in another process (Fission), with its own
+/// thread, console and sources. The tab's watcher announces it like the
+/// top-level document, with `isTopLevelTarget: false`, and again each time
+/// the iframe loads another document.
+///
+/// The watcher's breakpoint list covers it: a breakpoint by URL binds in its
+/// scripts too. Pauses, steps and evaluations go to its own thread
+/// ([`Debugger::thread_of`](crate::rdp::debugger::Debugger::thread_of)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameTarget {
+    /// The target actor: its resources (sources, thread states) come from it.
+    pub actor: String,
+    /// The thread actor: resume, step, stack frames.
+    pub thread_actor: String,
+    /// The console actor: evaluations.
+    pub console_actor: String,
+    /// `browsingContextID`: the iframe's browsing context, the same for every
+    /// document it loads.
+    pub browsing_context_id: Option<u64>,
+    /// The URL of its document when announced.
+    pub url: Option<String>,
+}
+
+impl FrameTarget {
+    /// The frame a `target-available-form` body announces, if it announces
+    /// one (not the top-level target).
+    pub fn from_form(body: &Value) -> Option<Self> {
+        let target = body.get("target")?;
+        if target.get("isTopLevelTarget") != Some(&Value::Bool(false)) {
+            return None;
+        }
+        let text = |key: &str| target.get(key).and_then(Value::as_str).map(str::to_string);
+        Some(Self {
+            actor: text("actor")?,
+            thread_actor: text("threadActor")?,
+            console_actor: text("consoleActor")?,
+            browsing_context_id: target.get("browsingContextID").and_then(Value::as_u64),
+            url: text("url"),
+        })
+    }
+}
+
 /// Where to break.
 ///
 /// `line` is **1-based** and `column` **0-based**, as in RDP. CDP counts lines

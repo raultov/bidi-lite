@@ -56,3 +56,15 @@ Captured in the 0.1.3 probe (PROMPT-02, Firefox 157.0.1, visible window), the sa
   first source (`{}`) and the second (`{"9": [2]}`).
 - `forwarding-cancelled.json`: `forwardingCancelled` notification from `root` after a debugger
   detached and its tab closed.
+
+Captured in the 0.1.5 probe (Firefox 159.0, headless, `--start-debugger-server ws:6100`) on a page of
+`127.0.0.1` whose iframe is of another origin (`localhost`, same port), which Firefox runs in its own
+process. Its script `inner.js` paused at a breakpoint set through the watcher's breakpoint list:
+- `frame-target-available.json`: `target-available-form` of the iframe's target
+  (`isTopLevelTarget: false`, its own `threadActor` and `consoleActor`, `browsingContextID`, `url`).
+- `frame-target-destroyed.json`: `target-destroyed-form` of the iframe's initial `about:blank` target,
+  replaced once the iframe loaded its page.
+- `frame-resources-sources.json`: `resources-available-array` carrying the iframe's `inner.js` source,
+  from the iframe's target.
+- `frame-resources-thread-state-paused.json`: `resources-available-array` carrying the iframe thread's
+  `paused` state (`why: breakpoint`), from the iframe's target.

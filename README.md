@@ -333,6 +333,32 @@ debugger.detach().await?;
 * One thread-state packet can carry several states (after a step: `resumed` and
   the new `paused`): read every state `parse_thread_states` returns.
 
+### Iframes of another origin
+
+Firefox runs an iframe of another origin in its own process, with its own
+target, thread, console and sources; the tab's watcher announces it like the
+top-level document. The debugger follows these frames as they come and go:
+
+```rust
+for frame in debugger.frame_targets() {
+    // frame.actor, frame.thread_actor, frame.console_actor, frame.browsing_context_id, frame.url
+    let scripts = debugger.frame_sources(&frame.actor);
+}
+let mut states = debugger.on_any_thread_state(); // the tab's and its frames' pauses
+// A pause's packet comes from a target actor: act in that target's thread.
+if let Some(thread) = debugger.thread_of(packet.from.as_deref().unwrap_or_default()) {
+    thread.evaluate_on_frame(&frame_actor, "n").await?;
+    thread.resume().await?;
+}
+```
+
+* Breakpoints need nothing more: the watcher's breakpoint list covers the frames,
+  and a column-less breakpoint takes its column from the frames' sources too.
+* `sources()`, `on_thread_state()`, `on_resource()`, `resume()`, `frames()`... keep
+  acting on the top-level document; `thread()` is its `TargetThread`.
+* Same-origin iframes share their parent's target: their scripts are among its
+  sources.
+
 ### Watching Extra RDP Resources (WebSocket frames, console, errors)
 
 Firefox's watcher can track resources beyond sources and thread states, such as
@@ -373,7 +399,8 @@ debugger.unwatch_resources(&["websocket"])?;
   `devtools.chrome.enabled` (already required above), works for top-level
   contexts only, and is validated on Firefox 157. `attach_selected` (the
   selected tab) and `attach_by_url` (the *first* tab whose URL matches) remain.
-* **Iframes:** only the tab's top-level document is followed.
+* **Iframes:** frames of another origin are followed (see above), validated on
+  Firefox 159; `find_in_sources` searches the top-level document only.
 * **Requests to the same RDP actor are serialised**, and one that is never
   answered blocks its actor's queue until the connection is replaced.
 * **A breakpoint outlives its debugger.** Unwatching does not remove

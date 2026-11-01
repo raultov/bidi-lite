@@ -1,0 +1,49 @@
+{
+  "array": [
+    [
+      "thread-state",
+      [
+        {
+          "frame": {
+            "actor": "server1.conn1.watcher3.process12//frame21",
+            "arguments": [
+              20
+            ],
+            "asyncCause": null,
+            "displayName": "innerHandler",
+            "state": "on-stack",
+            "this": {
+              "actor": "server1.conn1.watcher3.process12//obj22",
+              "class": "Window",
+              "extensible": true,
+              "frozen": false,
+              "isError": false,
+              "ownPropertyLength": 947,
+              "preview": {
+                "kind": "ObjectWithURL",
+                "url": "http://localhost:8765/r3/xotimer-inner.html"
+              },
+              "sealed": false,
+              "type": "object"
+            },
+            "type": "call",
+            "where": {
+              "actor": "server1.conn1.watcher3.process12//source18",
+              "column": 16,
+              "line": 2
+            }
+          },
+          "state": "paused",
+          "why": {
+            "actors": [
+              null
+            ],
+            "type": "breakpoint"
+          }
+        }
+      ]
+    ]
+  ],
+  "from": "server1.conn1.watcher3.process12//windowGlobalTarget2",
+  "type": "resources-available-array"
+}

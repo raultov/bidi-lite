@@ -21,9 +21,10 @@ use tokio::time::{Instant, timeout_at};
 
 pub use crate::rdp::resources::{
     BoundBreakpoint, Breakable, BreakpointLocation, Evaluation, FrameInfo, FrameLocation,
-    PauseOnExceptions, SourceInfo, ThreadState, locate, parse_resources, parse_sources,
-    parse_thread_states,
+    FrameTarget, PauseOnExceptions, SourceInfo, ThreadState, locate, parse_resources,
+    parse_sources, parse_thread_states,
 };
+pub use crate::rdp::thread::TargetThread;
 
 /// The resources the debugger watches.
 const RESOURCE_TYPES: [&str; 2] = ["source", "thread-state"];
@@ -36,11 +37,19 @@ struct TargetForm {
     console_actor: String,
 }
 
+/// A frame of the tab with a target of its own, and its sources.
+struct FrameState {
+    target: FrameTarget,
+    sources: Vec<SourceInfo>,
+}
+
 /// What the background task keeps up to date, shared by every clone.
 #[derive(Default)]
 struct State {
     target: Option<TargetForm>,
     sources: Vec<SourceInfo>,
+    /// The frames of another origin alive (see [`FrameTarget`]).
+    frames: Vec<FrameState>,
     sources_complete: bool,
     /// The breakpoints set through this debugger, column resolved, so that
     /// `remove_breakpoint` and `detach` send the same location.
@@ -364,7 +373,8 @@ impl Debugger {
     }
 
     /// The first breakable column of `line` (1-based) among the loaded sources
-    /// with `url`: what a column-less breakpoint binds to.
+    /// with `url`, of the current target and of the tab's frames of another
+    /// origin: what a column-less breakpoint binds to.
     ///
     /// A page has one source per inline `<script>`, all with the page's URL, so
     /// every one of them is asked (`getBreakpointPositionsCompressed`), in the
@@ -376,7 +386,7 @@ impl Debugger {
         } });
         let mut found = Breakable::NotLoaded;
         for source in self
-            .sources()
+            .every_source()
             .into_iter()
             .filter(|source| source.url.as_deref() == Some(url))
         {
@@ -424,46 +434,37 @@ impl Debugger {
         Ok(())
     }
 
-    /// Pauses at the next JavaScript to run (`interrupt`).
+    /// Pauses at the next JavaScript to run (`interrupt`) in the current
+    /// target's thread.
     pub async fn pause(&self) -> BidiResult<()> {
-        self.thread_request("interrupt", json!({ "when": "onNext" }))
-            .await
+        self.thread().pause().await
     }
 
-    /// Resumes. Fails with `wrongState` if the thread is not paused.
+    /// Resumes the current target's thread. Fails with `wrongState` if it is
+    /// not paused. A frame's thread: [`Debugger::thread_of`].
     pub async fn resume(&self) -> BidiResult<()> {
-        self.thread_request("resume", json!({ "resumeLimit": null }))
-            .await
+        self.thread().resume().await
     }
 
     /// Runs to the next line of the current function.
     pub async fn step_over(&self) -> BidiResult<()> {
-        self.step("next").await
+        self.thread().step_over().await
     }
 
     /// Steps into the call on the current line.
     pub async fn step_into(&self) -> BidiResult<()> {
-        self.step("step").await
+        self.thread().step_into().await
     }
 
     /// Runs until the current function returns, pausing in its caller.
     pub async fn step_out(&self) -> BidiResult<()> {
-        self.step("finish").await
+        self.thread().step_out().await
     }
 
-    /// `count` stack frames from `start`, while paused.
+    /// `count` stack frames from `start`, while the current target's thread
+    /// is paused.
     pub async fn frames(&self, start: u32, count: u32) -> BidiResult<Vec<FrameInfo>> {
-        let params = json!({ "start": start, "count": count });
-        let reply = self
-            .client
-            .request(&self.thread_actor(), "frames", params)
-            .await?;
-        let frames = reply
-            .body
-            .get("frames")
-            .and_then(Value::as_array)
-            .ok_or_else(|| BidiError::missing_field("frames", "frames"))?;
-        Ok(frames.iter().filter_map(FrameInfo::from_value).collect())
+        self.thread().frames(start, count).await
     }
 
     /// The scopes of a frame (`getEnvironment`), as Firefox sends them.
@@ -484,13 +485,14 @@ impl Debugger {
         frame_actor: &str,
         expression: &str,
     ) -> BidiResult<Evaluation> {
-        self.evaluate_with(json!({ "text": expression, "frameActor": frame_actor }))
+        self.thread()
+            .evaluate_on_frame(frame_actor, expression)
             .await
     }
 
     /// Evaluates `expression` in the page.
     pub async fn evaluate(&self, expression: &str) -> BidiResult<Evaluation> {
-        self.evaluate_with(json!({ "text": expression })).await
+        self.thread().evaluate(expression).await
     }
 
     /// Removes the breakpoints this debugger set, then stops watching targets and
@@ -597,37 +599,100 @@ impl Debugger {
 
     /// Resource packets of `resource_type` from the current target.
     pub fn on_resource(&self, resource_type: impl Into<String>) -> EventFilter<RdpPacket> {
-        let resource_type = resource_type.into();
+        self.resources_from(resource_type.into(), from_current_target)
+    }
+
+    /// Resource packets of `resource_type` from the current target or from
+    /// any of the tab's frames of another origin ([`Debugger::frame_targets`]):
+    /// the packet's `from` says which.
+    pub fn on_any_resource(&self, resource_type: impl Into<String>) -> EventFilter<RdpPacket> {
+        self.resources_from(resource_type.into(), from_any_target)
+    }
+
+    /// Resource packets of `resource_type` from the targets `counts` accepts.
+    fn resources_from(
+        &self,
+        resource_type: String,
+        counts: fn(&Shared, &RdpPacket) -> bool,
+    ) -> EventFilter<RdpPacket> {
         let state = Arc::clone(&self.state);
         let watcher = self.watcher.clone();
         EventFilter::with_predicate(self.client.subscribe(), move |packet| {
             // The background task may not have seen a target switch yet. The new
-            // target is announced on this stream before its resources, so applying
-            // it here keeps a pause right after a reload from being dropped.
-            if packet.r#type.as_deref() == Some("target-available-form") {
+            // target (the tab's, or a frame's) is announced on this stream before
+            // its resources, so applying it here keeps a pause right after a
+            // reload, or a frame's first pause, from being dropped.
+            if is_target_form(packet) {
                 apply(packet, &watcher, &state);
                 return false;
             }
-            from_current_target(&state, packet)
-                && !parse_resources(packet, &resource_type).is_empty()
+            counts(&state, packet) && !parse_resources(packet, &resource_type).is_empty()
         })
     }
 
-    async fn thread_request(&self, method: &str, params: Value) -> BidiResult<()> {
-        self.client
-            .request(&self.thread_actor(), method, params)
-            .await?;
-        Ok(())
+    /// The thread states of the current target and of the tab's frames of
+    /// another origin; read them with [`parse_thread_states`], and tell the
+    /// frames apart by the packet's `from` (a [`FrameTarget::actor`]).
+    pub fn on_any_thread_state(&self) -> EventFilter<RdpPacket> {
+        self.on_any_resource("thread-state")
     }
 
-    async fn step(&self, limit: &str) -> BidiResult<()> {
-        self.thread_request("resume", json!({ "resumeLimit": { "type": limit } }))
-            .await
+    /// The thread of the current target (the tab's top-level document).
+    pub fn thread(&self) -> TargetThread {
+        TargetThread::new(&self.client, &self.thread_actor(), &self.console_actor())
     }
 
-    /// `evaluateJSAsync` on the current target's console.
-    async fn evaluate_with(&self, params: Value) -> BidiResult<Evaluation> {
-        self.client.evaluate_on(&self.console_actor(), params).await
+    /// The thread of the target `target_actor`: the current one, or one of
+    /// the tab's frames of another origin; `None` for a target this tab does
+    /// not have (gone, or never announced).
+    pub fn thread_of(&self, target_actor: &str) -> Option<TargetThread> {
+        let state = read(&self.state);
+        if let Some(current) = state.target.as_ref().filter(|t| t.actor == target_actor) {
+            return Some(TargetThread::new(
+                &self.client,
+                &current.thread_actor,
+                &current.console_actor,
+            ));
+        }
+        state
+            .frames
+            .iter()
+            .find(|frame| frame.target.actor == target_actor)
+            .map(|frame| {
+                let target = &frame.target;
+                TargetThread::new(&self.client, &target.thread_actor, &target.console_actor)
+            })
+    }
+
+    /// The tab's frames of another origin alive, in the order announced.
+    ///
+    /// Same-origin iframes share their parent's target, thread and sources:
+    /// they are not here.
+    pub fn frame_targets(&self) -> Vec<FrameTarget> {
+        read(&self.state)
+            .frames
+            .iter()
+            .map(|frame| frame.target.clone())
+            .collect()
+    }
+
+    /// The sources of the frame target `target_actor` known so far; empty
+    /// for an unknown frame. Sources created by `evaluate*` are left out.
+    pub fn frame_sources(&self, target_actor: &str) -> Vec<SourceInfo> {
+        read(&self.state)
+            .frames
+            .iter()
+            .find(|frame| frame.target.actor == target_actor)
+            .map(|frame| frame.sources.clone())
+            .unwrap_or_default()
+    }
+
+    /// The sources of the current target and of every frame target: what a
+    /// breakpoint by URL can bind in.
+    fn every_source(&self) -> Vec<SourceInfo> {
+        let state = read(&self.state);
+        let frames = state.frames.iter().flat_map(|frame| frame.sources.iter());
+        state.sources.iter().chain(frames).cloned().collect()
     }
 
     /// A breakpoint set earlier for the same place, when the caller gives no column.
@@ -650,7 +715,7 @@ impl Debugger {
         let url = &location.source_url;
         if location.column.is_some() {
             let resolved = self
-                .sources()
+                .every_source()
                 .iter()
                 .any(|source| source.url.as_deref() == Some(url.as_str()));
             return Ok(BoundBreakpoint {
@@ -708,11 +773,71 @@ fn top_level_target(body: &Value) -> Option<TargetForm> {
     })
 }
 
+/// Whether `packet` announces a target or its end (`target-*-form`).
+fn is_target_form(packet: &RdpPacket) -> bool {
+    matches!(
+        packet.r#type.as_deref(),
+        Some("target-available-form" | "target-destroyed-form")
+    )
+}
+
+/// Whether `packet` was sent by the current top-level target or by one of
+/// the tab's frame targets.
+fn from_any_target(state: &Shared, packet: &RdpPacket) -> bool {
+    let Some(from) = packet.from.as_deref() else {
+        return false;
+    };
+    let state = read(state);
+    state.target.as_ref().is_some_and(|t| t.actor == from)
+        || state.frames.iter().any(|frame| frame.target.actor == from)
+}
+
+/// Adds the sources `packet` announces to `known`, but those `evaluate*`
+/// creates (each one announces one: they would pile up) and those known.
+fn add_sources(known: &mut Vec<SourceInfo>, packet: &RdpPacket) {
+    for source in parse_sources(packet) {
+        let evaluation = source.introduction_type.as_deref() == Some("debugger eval");
+        if !evaluation && !known.iter().any(|seen| seen.actor == source.actor) {
+            known.push(source);
+        }
+    }
+}
+
+/// Records the frame target a `target-available-form` announces (replacing
+/// one with the same actor), or forgets the one a `target-destroyed-form`
+/// ends, with its sources.
+fn apply_frame_form(packet: &RdpPacket, state: &Shared) {
+    if packet.r#type.as_deref() == Some("target-destroyed-form") {
+        let actor = str_at(&packet.body, &["target", "actor"]);
+        write(state)
+            .frames
+            .retain(|frame| Some(frame.target.actor.as_str()) != actor);
+        return;
+    }
+    let Some(target) = FrameTarget::from_form(&packet.body) else {
+        return;
+    };
+    let mut state = write(state);
+    // Applied by the background task and by every filter: only once.
+    if !state.frames.iter().any(|frame| frame.target == target) {
+        state
+            .frames
+            .retain(|frame| frame.target.actor != target.actor);
+        state.frames.push(FrameState {
+            target,
+            sources: Vec::new(),
+        });
+    }
+}
+
 /// Updates the state with one notification of the connection.
 ///
 /// Several tabs can share a connection, so only this watcher's targets and the
-/// current target's resources count.
+/// resources of the current target and of the tab's frames count.
 fn apply(packet: &RdpPacket, watcher: &str, state: &Shared) {
+    if is_target_form(packet) && packet.from.as_deref() == Some(watcher) {
+        apply_frame_form(packet, state);
+    }
     match packet.r#type.as_deref() {
         Some("target-available-form") if packet.from.as_deref() == Some(watcher) => {
             if let Some(target) = top_level_target(&packet.body) {
@@ -729,18 +854,17 @@ fn apply(packet: &RdpPacket, watcher: &str, state: &Shared) {
             }
         }
         Some("resources-available-array") if from_current_target(state, packet) => {
+            add_sources(&mut write(state).sources, packet);
+        }
+        Some("resources-available-array") => {
             let mut state = write(state);
-            for source in parse_sources(packet) {
-                // Every `evaluate*` announces one of these; they would pile up.
-                let evaluation = source.introduction_type.as_deref() == Some("debugger eval");
-                if !evaluation
-                    && !state
-                        .sources
-                        .iter()
-                        .any(|known| known.actor == source.actor)
-                {
-                    state.sources.push(source);
-                }
+            let from = packet.from.as_deref();
+            let frame = state
+                .frames
+                .iter_mut()
+                .find(|frame| Some(frame.target.actor.as_str()) == from);
+            if let Some(frame) = frame {
+                add_sources(&mut frame.sources, packet);
             }
         }
         _ => {}
@@ -2338,5 +2462,168 @@ mod tests {
         let _ = debugger.detach().await;
         let _ = tab.close().await;
         let _ = browser.end().await;
+    }
+
+    // The captured iframe of another origin (`rdp/frame-*.json`).
+    const FRAME: &str = "server1.conn1.watcher3.process12//windowGlobalTarget2";
+    const FRAME_THREAD: &str = "server1.conn1.watcher3.process12//thread1";
+    const FRAME_CONSOLE: &str = "server1.conn1.watcher3.process12//consoleActor3";
+    const FRAME_SOURCE: &str = "server1.conn1.watcher3.process12//source18";
+    const FRAME_SCRIPT: &str = "http://localhost:8765/r3/inner.js";
+
+    /// A captured packet of the tab's watcher, sent by the mock's watcher.
+    fn from_watcher(name: &str) -> Value {
+        let mut packet = fixture(name);
+        packet["from"] = json!(WATCHER);
+        packet
+    }
+
+    /// An attached debugger whose tab has the captured iframe of another
+    /// origin, its `inner.js` source announced.
+    async fn with_a_frame(overrides: Vec<RdpOverride>) -> (MockServer, Debugger) {
+        let (server, debugger) = attached(overrides).await;
+        server.push(from_watcher("rdp/frame-target-available.json"));
+        server.push(fixture("rdp/frame-resources-sources.json"));
+        eventually("the frame's source", || {
+            !debugger.frame_sources(FRAME).is_empty()
+        })
+        .await;
+        (server, debugger)
+    }
+
+    /// DBG-63: An iframe of another origin is tracked as a frame target with
+    /// its own sources, apart from the tab's; it goes once destroyed.
+    #[tokio::test]
+    async fn frames_of_another_origin_are_tracked() {
+        // Given a tab whose iframe of another origin announced its target and source
+        let (server, debugger) = with_a_frame(vec![]).await;
+
+        // Then the frame is known with its actors, context and URL
+        let expected = FrameTarget {
+            actor: FRAME.to_string(),
+            thread_actor: FRAME_THREAD.to_string(),
+            console_actor: FRAME_CONSOLE.to_string(),
+            browsing_context_id: Some(23_622_320_129),
+            url: Some("http://localhost:8765/r3/xotimer-inner.html".to_string()),
+        };
+        assert_eq!(debugger.frame_targets(), [expected]);
+        // And its source is its own, not the tab's, whose target did not change
+        let sources = debugger.frame_sources(FRAME);
+        assert_eq!(sources[0].url.as_deref(), Some(FRAME_SCRIPT));
+        assert!(
+            debugger
+                .sources()
+                .iter()
+                .all(|s| s.url.as_deref() != Some(FRAME_SCRIPT))
+        );
+        assert_eq!(debugger.thread_actor(), THREAD);
+
+        // When the frame's target is destroyed
+        let mut destroyed = from_watcher("rdp/frame-target-destroyed.json");
+        destroyed["target"]["actor"] = json!(FRAME);
+        server.push(destroyed);
+
+        // Then the frame and its sources are gone
+        eventually("the frame gone", || debugger.frame_targets().is_empty()).await;
+        assert!(debugger.frame_sources(FRAME).is_empty());
+    }
+
+    /// DBG-64: A column-less breakpoint resolves in a frame's source too: the
+    /// watcher's breakpoint list covers the frames.
+    #[tokio::test]
+    async fn breakpoints_resolve_in_frame_sources() {
+        // Given a frame whose inner.js breaks at line 2, column 16
+        let reply = rdp_reply(FRAME_SOURCE, json!({ "positions": { "2": [16] } }));
+        let overrides = vec![(
+            (FRAME_SOURCE, "getBreakpointPositionsCompressed"),
+            vec![reply],
+        )];
+        let (mut server, debugger) = with_a_frame(overrides).await;
+
+        // When a breakpoint is set on that line without a column
+        let bound = debugger
+            .set_breakpoint_resolved(&location(FRAME_SCRIPT, 2, None), None)
+            .await
+            .expect("set");
+
+        // Then it binds at the frame source's column, through the breakpoint list
+        assert_eq!(bound.location.column, Some(16));
+        assert!(bound.resolved);
+        let command = server.next_command_named("setBreakpoint").await;
+        assert_eq!(command["to"], BP_LIST);
+        assert_eq!(command["location"]["column"], 16);
+    }
+
+    /// DBG-65: `on_any_thread_state` yields the thread states of the tab's
+    /// frames too, not those of other watchers' targets.
+    #[tokio::test]
+    async fn any_thread_state_includes_the_frames() {
+        // Given a tab with a frame, and a filter on any of its thread states
+        let (server, debugger) = with_a_frame(vec![]).await;
+        let mut states = debugger.on_any_thread_state();
+
+        // When another target pauses, then the frame does
+        server.push(rdp_reply(
+            "otherTarget",
+            fixture("rdp/resources-thread-state-paused.json"),
+        ));
+        server.push(fixture("rdp/frame-resources-thread-state-paused.json"));
+
+        // Then the first packet yielded is the frame's pause
+        let packet = timeout(WAIT, states.next())
+            .await
+            .expect("a packet")
+            .expect("open")
+            .expect("no lag");
+        assert_eq!(packet.from.as_deref(), Some(FRAME));
+        assert!(matches!(
+            parse_thread_states(&packet).as_slice(),
+            [ThreadState::Paused { .. }]
+        ));
+    }
+
+    /// DBG-66: The thread of a frame resumes, steps and evaluates in that
+    /// frame; the tab's own thread is reached the same way.
+    #[tokio::test]
+    async fn frame_threads_act_in_their_frame() {
+        // Given a frame whose console answers an evaluation
+        let replies = vec![
+            rdp_reply(FRAME_CONSOLE, json!({ "resultID": "r-1" })),
+            rdp_reply(
+                FRAME_CONSOLE,
+                json!({ "type": "evaluationResult", "resultID": "r-1", "result": 40 }),
+            ),
+        ];
+        let overrides = vec![((FRAME_CONSOLE, "evaluateJSAsync"), replies)];
+        let (mut server, debugger) = with_a_frame(overrides).await;
+        let thread = debugger.thread_of(FRAME).expect("the frame's thread");
+
+        // When it resumes, steps and evaluates in a paused frame
+        thread.resume().await.expect("resume");
+        thread.step_over().await.expect("next");
+        let evaluation = thread
+            .evaluate_on_frame("frame21", "twice")
+            .await
+            .expect("evaluated");
+
+        // Then each request went to the frame's thread or console
+        for limit in [Value::Null, json!({ "type": "next" })] {
+            let command = server.next_command().await;
+            assert_eq!(
+                (command["to"].as_str(), command["type"].as_str()),
+                (Some(FRAME_THREAD), Some("resume"))
+            );
+            assert_eq!(command.get("resumeLimit"), Some(&limit));
+        }
+        let command = server.next_command().await;
+        assert_eq!(command["to"], FRAME_CONSOLE);
+        assert_eq!(command["frameActor"], "frame21");
+        assert_eq!(evaluation.result, 40);
+        // And the tab's thread is its target's; an unknown target has none
+        assert_eq!(
+            debugger.thread_of(TARGET).expect("tab").thread_actor(),
+            THREAD
+        );
+        assert!(debugger.thread_of("gone").is_none());
     }
 }

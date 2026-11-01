@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Iframes of another origin, which Firefox runs in their own process with their
+  own target, thread, console and sources, are followed by the `Debugger`:
+  `FrameTarget` (from `target-available-form` with `isTopLevelTarget: false`,
+  forgotten on `target-destroyed-form`), `Debugger::frame_targets`,
+  `Debugger::frame_sources`, `Debugger::on_any_resource` and
+  `Debugger::on_any_thread_state` (the tab's and its frames' thread states).
+- `TargetThread` (new module `rdp::thread`): pause, resume, steps, stack frames
+  and evaluations on one target's thread and console.
+  `Debugger::thread` (the current target's) and `Debugger::thread_of` (any
+  target of the tab, frames included).
+
+### Changed
+- `Debugger::breakable_column`, and so a column-less `set_breakpoint`, also look
+  in the sources of the tab's frames of another origin: the watcher's breakpoint
+  list already covered them, but a breakpoint on a frame's script failed as not
+  loaded. `set_breakpoint_resolved` says `resolved` for them too.
+- `Debugger::pause`, `resume`, `step_*`, `frames`, `evaluate_on_frame` and
+  `evaluate` go through `Debugger::thread()` (same requests).
+
 ## [0.1.4] - 2026-10-25
 
 ### Added

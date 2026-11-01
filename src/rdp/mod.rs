@@ -5,3 +5,4 @@ pub mod context;
 pub mod debugger;
 pub mod protocol;
 pub mod resources;
+pub mod thread;
