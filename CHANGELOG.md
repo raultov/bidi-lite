@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-01
+
 ### Added
 - Iframes of another origin, which Firefox runs in their own process with their
   own target, thread, console and sources, are followed by the `Debugger`:
