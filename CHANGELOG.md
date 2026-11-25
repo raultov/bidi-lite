@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-25
+
 ### Added
 - The `Debugger` follows the tab's service workers once asked (#1):
   `Debugger::watch_service_workers` (`watchTargets` with
