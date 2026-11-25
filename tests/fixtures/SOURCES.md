@@ -68,3 +68,17 @@ process. Its script `inner.js` paused at a breakpoint set through the watcher's 
   from the iframe's target.
 - `frame-resources-thread-state-paused.json`: `resources-available-array` carrying the iframe thread's
   `paused` state (`why: breakpoint`), from the iframe's target.
+
+Captured in the service worker probe (issue #1, Firefox 160.0.1, visible window, `tests/firefox.sh`) on a
+page of `127.0.0.1` that registers `/sw/sw.js`, the tab's watcher asked to `watchTargets` with
+`targetType: "service_worker"` and the preference `dom.worker.console.dispatch_events_to_main_thread`
+set to `false`:
+- `sw-target-available.json`: `target-available-form` of the service worker (`targetType: "service_worker"`,
+  `type: 2`, its `threadActor`, `consoleActor`, `id` and script `url`; no `isTopLevelTarget`).
+- `sw-target-destroyed.json`: `target-destroyed-form` of the same worker (the whole form, `options: {}`).
+- `sw-resources-sources.json`: `resources-available-array` carrying the worker's `sw.js` source, from
+  the worker's target.
+- `sw-resources-console-message.json`: `resources-available-array` carrying two `console-message`
+  resources of the worker (`console.warn` and `console.error`, the latter with its `stacktrace`), from
+  the worker's target. Firefox sent no `error-message` for the worker's uncaught errors, so none was
+  captured.

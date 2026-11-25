@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The `Debugger` follows the tab's service workers once asked (#1):
+  `Debugger::watch_service_workers` (`watchTargets` with
+  `targetType: "service_worker"`), `Debugger::unwatch_service_workers`,
+  `Debugger::service_worker_targets`, `Debugger::service_worker_sources` and
+  `Debugger::on_service_worker_resource` (resource packets of the tab's service
+  workers only). `WorkerTarget` reads a worker's `target-available-form` /
+  `target-destroyed-form`. A worker stopped by Firefox is forgotten, and
+  followed again when it restarts under a new actor.
+- The README documents the preference service workers' console messages need
+  (`dom.worker.console.dispatch_events_to_main_thread`, `false`), its effect on
+  dedicated workers, and what the tab's watcher does not report of a service
+  worker (uncaught errors, its own requests), as measured on Firefox 160.
+
+### Changed
+- `Debugger::on_any_resource`, `on_any_thread_state`, `thread_of` and the
+  column resolution of `set_breakpoint` / `breakable_column` include the tab's
+  service workers while they are watched. Nothing changes unless
+  `watch_service_workers` is called.
+- `Debugger::detach` also unwatches the service workers when they are watched.
+
+### Fixed
+- `Debugger::breakable_column`, and so a column-less `set_breakpoint`, failed
+  as a whole when one source with the URL was gone (`noSuchActor`: its frame
+  navigated, or now its worker stopped). Such a source is skipped; if none is
+  left, the URL counts as not loaded.
+- A frame target that had ended could be followed again when a filter that
+  lagged behind replayed its old `target-available-form`. Ended targets (and
+  forgotten service workers) are remembered and their old forms ignored.
+
 ## [0.1.5] - 2026-11-01
 
 ### Added

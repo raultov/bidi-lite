@@ -58,15 +58,72 @@ impl FrameTarget {
         if target.get("isTopLevelTarget") != Some(&Value::Bool(false)) {
             return None;
         }
-        let text = |key: &str| target.get(key).and_then(Value::as_str).map(str::to_string);
         Some(Self {
-            actor: text("actor")?,
-            thread_actor: text("threadActor")?,
-            console_actor: text("consoleActor")?,
+            actor: text(target, "actor")?,
+            thread_actor: text(target, "threadActor")?,
+            console_actor: text(target, "consoleActor")?,
             browsing_context_id: target.get("browsingContextID").and_then(Value::as_u64),
-            url: text("url"),
+            url: text(target, "url"),
         })
     }
+}
+
+/// The `targetType`s of Firefox's worker targets.
+const WORKER_TARGET_TYPES: [&str; 3] = ["worker", "shared_worker", "service_worker"];
+
+/// A worker with a target of its own: its thread, console and sources.
+///
+/// The [`Debugger`](crate::rdp::debugger::Debugger) follows the tab's
+/// service workers once asked to
+/// ([`Debugger::watch_service_workers`](crate::rdp::debugger::Debugger::watch_service_workers)).
+/// The tab's watcher announces each one with a `target-available-form` of
+/// `targetType: "service_worker"`, and its end with a `target-destroyed-form`:
+/// Firefox stops an idle service worker and starts it again on its next
+/// event, under a new target actor with the same [`WorkerTarget::id`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerTarget {
+    /// The target actor: its resources (sources, console messages, thread
+    /// states) come from it.
+    pub actor: String,
+    /// The thread actor: resume, step, stack frames.
+    pub thread_actor: String,
+    /// The console actor: evaluations in the worker.
+    pub console_actor: String,
+    /// `targetType`: `"service_worker"`, `"worker"` or `"shared_worker"`.
+    pub target_type: String,
+    /// The worker's `id`, the same across its restarts; for a service worker,
+    /// the `activeWorker.id` of `root.listServiceWorkerRegistrations`.
+    pub id: Option<String>,
+    /// The URL of the worker's script.
+    pub url: Option<String>,
+}
+
+impl WorkerTarget {
+    /// The worker a `target-available-form` or `target-destroyed-form` body
+    /// announces, if it announces one.
+    pub fn from_form(body: &Value) -> Option<Self> {
+        let target = body.get("target")?;
+        let target_type = text(target, "targetType")
+            .filter(|kind| WORKER_TARGET_TYPES.contains(&kind.as_str()))?;
+        Some(Self {
+            actor: text(target, "actor")?,
+            thread_actor: text(target, "threadActor")?,
+            console_actor: text(target, "consoleActor")?,
+            target_type,
+            id: text(target, "id"),
+            url: text(target, "url"),
+        })
+    }
+
+    /// Whether it is a service worker.
+    pub fn is_service_worker(&self) -> bool {
+        self.target_type == "service_worker"
+    }
+}
+
+/// The string field `key` of a target form.
+fn text(target: &Value, key: &str) -> Option<String> {
+    target.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 /// Where to break.
@@ -584,6 +641,45 @@ mod tests {
         let thrown = Evaluation::from_packet(&thrown);
         assert_eq!(thrown.exception.expect("an exception")["class"], "Error");
         assert!(thrown.result.is_null());
+    }
+
+    /// DBG-76: `WorkerTarget` reads a captured service worker form; frames
+    /// and workers are told apart.
+    #[test]
+    fn worker_target_reads_a_service_worker_form() {
+        // Given the service worker form Firefox 160 announced
+        let available = fixture("rdp/sw-target-available.json");
+
+        // When it is read
+        let worker = WorkerTarget::from_form(&available).expect("a worker");
+
+        // Then it is a service worker, with its actors, id and script
+        assert!(worker.is_service_worker());
+        assert!(worker.actor.ends_with("/workerTarget5"));
+        assert!(worker.thread_actor.ends_with("/thread1"));
+        assert!(worker.console_actor.ends_with("/console2"));
+        assert_eq!(
+            worker.id.as_deref(),
+            Some("d3aa6c32-5908-4563-a36a-d9c7040684f7")
+        );
+        assert_eq!(
+            worker.url.as_deref(),
+            Some("http://127.0.0.1:36631/sw/sw.js")
+        );
+        // And its destroyed form names the same worker
+        let destroyed = fixture("rdp/sw-target-destroyed.json");
+        assert_eq!(WorkerTarget::from_form(&destroyed), Some(worker));
+        // And no frame form is a worker, nor a worker form a frame
+        for frame in [
+            "rdp/frame-target-available.json",
+            "rdp/target-available.json",
+        ] {
+            assert!(
+                WorkerTarget::from_form(&fixture(frame)).is_none(),
+                "{frame}"
+            );
+        }
+        assert!(FrameTarget::from_form(&available).is_none());
     }
 
     /// DBG-34: `PauseOnExceptions` maps to the configuration Firefox expects.

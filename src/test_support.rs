@@ -506,6 +506,22 @@ const FIXTURES: &[(&str, &str)] = &[
         include_str!("../tests/fixtures/rdp/source-long-string.json"),
     ),
     (
+        "rdp/sw-resources-console-message.json",
+        include_str!("../tests/fixtures/rdp/sw-resources-console-message.json"),
+    ),
+    (
+        "rdp/sw-resources-sources.json",
+        include_str!("../tests/fixtures/rdp/sw-resources-sources.json"),
+    ),
+    (
+        "rdp/sw-target-available.json",
+        include_str!("../tests/fixtures/rdp/sw-target-available.json"),
+    ),
+    (
+        "rdp/sw-target-destroyed.json",
+        include_str!("../tests/fixtures/rdp/sw-target-destroyed.json"),
+    ),
+    (
         "rdp/target-available.json",
         include_str!("../tests/fixtures/rdp/target-available.json"),
     ),
@@ -691,15 +707,29 @@ fn default_rdp_replies(packet: &Value, to: &str, kind: &str) -> Vec<Value> {
             to,
             json!({ "configuration": { "actor": "server1.conn1.thread-configuration5" } }),
         )],
-        "watchTargets" => vec![
-            rdp_reply(to, fixture("rdp/target-available.json")),
-            rdp_reply(to, json!({})),
-        ],
+        "watchTargets" => watch_targets_replies(packet, to),
         "watchResources" => watch_resources_replies(packet, to),
         // One-way requests: Firefox never answers them.
         "unwatchTargets" | "unwatchResources" => Vec::new(),
         _ => vec![rdp_reply(to, json!({}))],
     }
+}
+
+/// Firefox announces the top-level target before its reply to `watchTargets`,
+/// but a service worker after it (the worker's target is created in the
+/// worker's process), followed by its sources, which a debugger watches.
+fn watch_targets_replies(packet: &Value, to: &str) -> Vec<Value> {
+    if packet["targetType"] == "service_worker" {
+        return vec![
+            rdp_reply(to, json!({})),
+            rdp_reply(to, fixture("rdp/sw-target-available.json")),
+            fixture("rdp/sw-resources-sources.json"),
+        ];
+    }
+    vec![
+        rdp_reply(to, fixture("rdp/target-available.json")),
+        rdp_reply(to, json!({})),
+    ]
 }
 
 fn watch_resources_replies(packet: &Value, to: &str) -> Vec<Value> {
@@ -1019,6 +1049,39 @@ mod tests {
         }
         // And an ordinary request still gets its reply
         assert!(!handler(&json!({ "to": "watcher1", "type": "watchTargets" })).is_empty());
+    }
+
+    /// MCK-15: Asked to watch service workers, the RDP handler announces the
+    /// captured one after the reply, then its sources, like Firefox.
+    #[test]
+    fn rdp_handler_announces_a_service_worker_after_the_reply() {
+        // Given the Firefox-like RDP handler
+        let handler = rdp_firefox_like(vec![]);
+
+        // When a watcher is asked to watch service workers
+        let packets = handler(
+            &json!({ "to": "watcher1", "type": "watchTargets", "targetType": "service_worker" }),
+        );
+
+        // Then the reply comes first, then the worker's form from that watcher, then its sources
+        let kinds: Vec<Option<&str>> = packets.iter().map(|p| p["type"].as_str()).collect();
+        assert_eq!(
+            kinds,
+            [
+                None,
+                Some("target-available-form"),
+                Some("resources-available-array")
+            ]
+        );
+        assert_eq!(packets[0]["from"], "watcher1");
+        assert_eq!(packets[1]["from"], "watcher1");
+        assert_eq!(packets[1]["target"]["targetType"], "service_worker");
+        assert_eq!(packets[2]["from"], packets[1]["target"]["actor"]);
+        // And the frame targets are still announced as before: the top-level target, then the reply
+        let frames =
+            handler(&json!({ "to": "watcher1", "type": "watchTargets", "targetType": "frame" }));
+        assert_eq!(frames[0]["type"], "target-available-form");
+        assert_eq!(frames[0]["target"]["isTopLevelTarget"], true);
     }
 
     /// MCK-12: `wait_until_closed` fails when the client stays connected.

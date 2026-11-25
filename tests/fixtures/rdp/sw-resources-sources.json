@@ -1,0 +1,23 @@
+{
+  "array": [
+    [
+      "source",
+      [
+        {
+          "actor": "server1.conn3.watcher184.process26//workerTarget1/source6",
+          "extensionName": null,
+          "isBlackBoxed": false,
+          "isInlineSource": false,
+          "sourceLength": 778,
+          "sourceMapBaseURL": "http://127.0.0.1:36631/sw/sw.js",
+          "sourceMapURL": null,
+          "sourceStartColumn": 0,
+          "sourceStartLine": 1,
+          "url": "http://127.0.0.1:36631/sw/sw.js"
+        }
+      ]
+    ]
+  ],
+  "from": "server1.conn3.watcher184.process26//workerTarget1/workerTarget5",
+  "type": "resources-available-array"
+}

@@ -1,6 +1,6 @@
-//! Requests to one JavaScript thread of a tab: its top-level document's, or
-//! the thread of one of its frames of another origin (which Firefox runs in
-//! another process).
+//! Requests to one JavaScript thread of a tab: its top-level document's, the
+//! thread of one of its frames of another origin (which Firefox runs in
+//! another process), or the thread of one of its service workers.
 //!
 //! [`Debugger`](crate::rdp::debugger::Debugger) hands them out
 //! ([`Debugger::thread`](crate::rdp::debugger::Debugger::thread),

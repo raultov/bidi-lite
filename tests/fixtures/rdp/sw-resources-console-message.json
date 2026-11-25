@@ -1,0 +1,45 @@
+{
+  "array": [
+    [
+      "console-message",
+      [
+        {
+          "arguments": [
+            "sw warn",
+            42
+          ],
+          "columnNumber": 11,
+          "filename": "http://127.0.0.1:36631/sw/sw.js",
+          "innerWindowID": 0,
+          "level": "warn",
+          "lineNumber": 6,
+          "sourceId": "server1.conn3.watcher184.process26//workerTarget1/source6",
+          "timeStamp": 1795641897514.514
+        },
+        {
+          "arguments": [
+            "sw console error"
+          ],
+          "columnNumber": 11,
+          "filename": "http://127.0.0.1:36631/sw/sw.js",
+          "innerWindowID": 0,
+          "level": "error",
+          "lineNumber": 7,
+          "sourceId": "server1.conn3.watcher184.process26//workerTarget1/source6",
+          "stacktrace": [
+            {
+              "columnNumber": 11,
+              "filename": "http://127.0.0.1:36631/sw/sw.js",
+              "functionName": "",
+              "lineNumber": 7,
+              "sourceId": "server1.conn3.watcher184.process26//workerTarget1/source6"
+            }
+          ],
+          "timeStamp": 1795641897514.605
+        }
+      ]
+    ]
+  ],
+  "from": "server1.conn3.watcher184.process26//workerTarget1/workerTarget5",
+  "type": "resources-available-array"
+}

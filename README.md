@@ -359,6 +359,59 @@ if let Some(thread) = debugger.thread_of(packet.from.as_deref().unwrap_or_defaul
 * Same-origin iframes share their parent's target: their scripts are among its
   sources.
 
+### Service workers
+
+The tab's watcher also announces the tab's service workers, each a target with
+its own thread, console and sources, once asked. It is opt-in:
+
+```rust
+debugger.watch_resources(&["console-message"]).await?;
+let mut worker_console = debugger.on_service_worker_resource("console-message");
+debugger.watch_service_workers().await?; // `detach()` unwatches them
+for worker in debugger.service_worker_targets() {
+    // worker.actor, worker.thread_actor, worker.console_actor, worker.id, worker.url
+    let scripts = debugger.service_worker_sources(&worker.actor);
+}
+```
+
+* `on_service_worker_resource(kind)` yields only the workers' packets;
+  `on_any_resource(kind)` and `on_any_thread_state()` include them too (the
+  packet's `from` is a `WorkerTarget::actor`), `on_resource(kind)` does not.
+* Breakpoints bind in the workers' scripts through the tab's breakpoint list, a
+  column-less one included; a worker's pause is resumed with
+  `thread_of(&worker.actor)`.
+* A worker comes and goes on its own: Firefox stops an idle one (after 30 s by
+  default) and announces its end, then starts it again on its next event under
+  a new target actor, with the same `id`. Its sources go with it: while it is
+  stopped, a column-less breakpoint on its script fails as not loaded; give the
+  column, and it binds when the worker starts. Firefox announces a worker
+  shortly *after* answering `watchTargets`, so the list can be empty right
+  after `watch_service_workers()` returns. `unwatch_service_workers()` stops
+  and forgets them; watching again announces the running worker under a new
+  actor.
+* Each time Firefox announces a worker's target, that target first sends the
+  console messages the worker logged before (Firefox keeps them): after a
+  restart or a new `watch_service_workers()`, earlier messages come again.
+* **Console messages need a preference.** By default Firefox hands the console
+  calls of every worker to the main thread of the worker's process, and the
+  worker's target reports none; a service worker runs in another process than
+  its page, so its messages reach neither the tab nor BiDi's `log.entryAdded`.
+  With this preference they come from the worker's target as `console-message`
+  resources (`console.error` included, with its stack):
+
+  ```js
+  user_pref("dom.worker.console.dispatch_events_to_main_thread", false);
+  ```
+
+  It applies to **every** worker: the console calls of dedicated workers then
+  no longer reach BiDi's `log.entryAdded` nor the page's `console-message`
+  either (measured on Firefox 160).
+* **Not reported by the tab's watcher** (Firefox 160): a worker's uncaught
+  errors (no `error-message` from any target; `console.error` calls do arrive)
+  and the requests the worker itself makes (no `network-event`). The page's
+  requests that the worker answers are the page's own `network-event`s, with
+  `fromServiceWorker: true` in their updates.
+
 ### Watching Extra RDP Resources (WebSocket frames, console, errors)
 
 Firefox's watcher can track resources beyond sources and thread states, such as
@@ -401,6 +454,10 @@ debugger.unwatch_resources(&["websocket"])?;
   selected tab) and `attach_by_url` (the *first* tab whose URL matches) remain.
 * **Iframes:** frames of another origin are followed (see above), validated on
   Firefox 159; `find_in_sources` searches the top-level document only.
+* **Service workers** are followed once watched (see above), validated on
+  Firefox 160. Their console messages need
+  `dom.worker.console.dispatch_events_to_main_thread` set to `false`; their
+  uncaught errors and their own requests do not reach the tab's watcher.
 * **Requests to the same RDP actor are serialised**, and one that is never
   answered blocks its actor's queue until the connection is replaced.
 * **A breakpoint outlives its debugger.** Unwatching does not remove

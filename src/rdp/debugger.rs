@@ -5,13 +5,17 @@
 //! bootstrap of modern DevTools: one watcher per tab announces the tab's
 //! top-level target (thread and console actors) and its sources, and keeps
 //! announcing the new target every time the tab navigates, reloads included.
+//! The same watcher announces the tab's iframes of another origin and, once
+//! asked, its service workers, each a target with its own thread and sources.
 
+use crate::client::EVENT_CHANNEL_CAPACITY;
 use crate::error::{BidiError, BidiResult, codes};
 use crate::event_filter::EventFilter;
 use crate::protocol::{NoParams, str_at};
 use crate::rdp::client::{RdpClient, TabDescriptor};
 use crate::rdp::protocol::{RdpPacket, actor_in};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -21,13 +25,16 @@ use tokio::time::{Instant, timeout_at};
 
 pub use crate::rdp::resources::{
     BoundBreakpoint, Breakable, BreakpointLocation, Evaluation, FrameInfo, FrameLocation,
-    FrameTarget, PauseOnExceptions, SourceInfo, ThreadState, locate, parse_resources,
+    FrameTarget, PauseOnExceptions, SourceInfo, ThreadState, WorkerTarget, locate, parse_resources,
     parse_sources, parse_thread_states,
 };
 pub use crate::rdp::thread::TargetThread;
 
 /// The resources the debugger watches.
 const RESOURCE_TYPES: [&str; 2] = ["source", "thread-state"];
+
+/// The `targetType` of service workers, for `watchTargets` and `unwatchTargets`.
+const SERVICE_WORKER: &str = "service_worker";
 
 /// The actors of the tab's current top-level target.
 #[derive(Debug, Clone)]
@@ -37,9 +44,60 @@ struct TargetForm {
     console_actor: String,
 }
 
-/// A frame of the tab with a target of its own, and its sources.
-struct FrameState {
-    target: FrameTarget,
+/// A target of the tab other than its top-level document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OtherTarget {
+    /// An iframe of another origin.
+    Frame(FrameTarget),
+    /// A service worker, followed while watched.
+    Worker(WorkerTarget),
+}
+
+impl OtherTarget {
+    /// The frame a form announces or ends, or the service worker when
+    /// `service_workers` are followed.
+    fn from_form(body: &Value, service_workers: bool) -> Option<Self> {
+        if let Some(frame) = FrameTarget::from_form(body) {
+            return Some(Self::Frame(frame));
+        }
+        WorkerTarget::from_form(body)
+            .filter(|worker| service_workers && worker.is_service_worker())
+            .map(Self::Worker)
+    }
+
+    fn actor(&self) -> &str {
+        match self {
+            Self::Frame(frame) => &frame.actor,
+            Self::Worker(worker) => &worker.actor,
+        }
+    }
+
+    fn frame(&self) -> Option<&FrameTarget> {
+        match self {
+            Self::Frame(frame) => Some(frame),
+            Self::Worker(_) => None,
+        }
+    }
+
+    fn worker(&self) -> Option<&WorkerTarget> {
+        match self {
+            Self::Worker(worker) => Some(worker),
+            Self::Frame(_) => None,
+        }
+    }
+
+    fn thread(&self, client: &RdpClient) -> TargetThread {
+        let (thread, console) = match self {
+            Self::Frame(frame) => (&frame.thread_actor, &frame.console_actor),
+            Self::Worker(worker) => (&worker.thread_actor, &worker.console_actor),
+        };
+        TargetThread::new(client, thread, console)
+    }
+}
+
+/// A target of the tab other than its top-level document, and its sources.
+struct OtherState {
+    target: OtherTarget,
     sources: Vec<SourceInfo>,
 }
 
@@ -48,13 +106,40 @@ struct FrameState {
 struct State {
     target: Option<TargetForm>,
     sources: Vec<SourceInfo>,
-    /// The frames of another origin alive (see [`FrameTarget`]).
-    frames: Vec<FrameState>,
+    /// The tab's other targets alive, in the order announced: its frames of
+    /// another origin (see [`FrameTarget`]), and its service workers while
+    /// watched (see [`WorkerTarget`]).
+    others: Vec<OtherState>,
     sources_complete: bool,
     /// The breakpoints set through this debugger, column resolved, so that
     /// `remove_breakpoint` and `detach` send the same location.
     breakpoints: Vec<BreakpointLocation>,
     extra_resources: Vec<String>,
+    /// Whether the tab's service workers are watched.
+    service_workers: bool,
+    /// The other targets that ended or were forgotten, newest last. A filter
+    /// that lags behind replays old forms when it is polled again; an old
+    /// form of one of these must not bring it back. Firefox never reuses an
+    /// actor on a connection (a worker watched again comes under a new one).
+    ended: VecDeque<String>,
+}
+
+/// How many ended targets [`State`] remembers: as many as packets the default
+/// event ring holds, the furthest a filter can lag before it reports `Lagged`.
+const ENDED_TARGETS: usize = EVENT_CHANNEL_CAPACITY;
+
+impl State {
+    /// Forgets the other target `actor` for good.
+    fn end(&mut self, actor: &str) {
+        self.others.retain(|other| other.target.actor() != actor);
+        if self.ended.iter().any(|ended| ended == actor) {
+            return;
+        }
+        if self.ended.len() == ENDED_TARGETS {
+            self.ended.pop_front();
+        }
+        self.ended.push_back(actor.to_string());
+    }
 }
 
 type Shared = Arc<RwLock<State>>;
@@ -134,7 +219,7 @@ impl Debugger {
             .await?;
         if let Err(error) = watch_bootstrap_resources(client, &watcher, &mut events, &state).await {
             // Firefox would otherwise go on announcing this tab's targets for nobody.
-            unwatch(client, &watcher, &[]);
+            unwatch(client, &watcher, &[], false);
             return Err(error);
         }
         // The reader broadcasts a notification before it routes the reply that
@@ -373,12 +458,15 @@ impl Debugger {
     }
 
     /// The first breakable column of `line` (1-based) among the loaded sources
-    /// with `url`, of the current target and of the tab's frames of another
-    /// origin: what a column-less breakpoint binds to.
+    /// with `url`, of the current target, of the tab's frames of another
+    /// origin and of its service workers when watched: what a column-less
+    /// breakpoint binds to.
     ///
     /// A page has one source per inline `<script>`, all with the page's URL, so
     /// every one of them is asked (`getBreakpointPositionsCompressed`), in the
-    /// order they were announced, until one has a position on the line.
+    /// order they were announced, until one has a position on the line. A
+    /// source whose actor is gone (its worker stopped, its frame navigated) is
+    /// skipped, and counts as not loaded.
     pub async fn breakable_column(&self, url: &str, line: u32) -> BidiResult<Breakable> {
         let query = json!({ "query": {
             "start": { "line": line, "column": 0 },
@@ -390,11 +478,16 @@ impl Debugger {
             .into_iter()
             .filter(|source| source.url.as_deref() == Some(url))
         {
-            found = Breakable::Nowhere;
-            let reply = self
+            let reply = match self
                 .client
                 .request(&source.actor, "getBreakpointPositionsCompressed", &query)
-                .await?;
+                .await
+            {
+                Ok(reply) => reply,
+                Err(BidiError::ProtocolError { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            found = Breakable::Nowhere;
             let column = reply.body["positions"][line.to_string()]
                 .as_array()
                 .into_iter()
@@ -496,7 +589,7 @@ impl Debugger {
     }
 
     /// Removes the breakpoints this debugger set, then stops watching targets and
-    /// resources.
+    /// resources (service workers included, if watched).
     ///
     /// Unwatching does not remove breakpoints, hence the order. The unwatch
     /// requests are one-way: Firefox does not answer them. A paused thread stays
@@ -505,11 +598,12 @@ impl Debugger {
     ///
     /// It detaches every clone: they share the breakpoints and the background task.
     pub async fn detach(self) -> BidiResult<()> {
-        let (breakpoints, extra) = {
+        let (breakpoints, extra, service_workers) = {
             let mut state = write(&self.state);
             (
                 std::mem::take(&mut state.breakpoints),
                 std::mem::take(&mut state.extra_resources),
+                std::mem::take(&mut state.service_workers),
             )
         };
         let mut first_error = None;
@@ -528,9 +622,81 @@ impl Debugger {
             }
         }
 
-        unwatch(&self.client, &self.watcher, &extra);
+        unwatch(&self.client, &self.watcher, &extra, service_workers);
         self.follower.0.abort();
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// Follows the tab's service workers too (`watchTargets` with
+    /// `targetType: "service_worker"`): see [`Debugger::service_worker_targets`].
+    ///
+    /// Their resources then come through
+    /// [`Debugger::on_service_worker_resource`] and
+    /// [`Debugger::on_any_resource`], and breakpoints bind in their scripts.
+    /// Their console messages need `watch_resources(&["console-message"])`
+    /// and, in the profile, `dom.worker.console.dispatch_events_to_main_thread`
+    /// set to `false` (see the README).
+    ///
+    /// Firefox announces a worker shortly *after* answering, so the list may
+    /// still be empty when this returns. While they are watched, or being
+    /// watched, a call sends nothing; [`Debugger::detach`] unwatches them. If
+    /// Firefox refuses or does not answer, a one-way `unwatchTargets` undoes
+    /// the request.
+    pub async fn watch_service_workers(&self) -> BidiResult<()> {
+        // Set before asking, so that a worker announced before the reply is followed.
+        if std::mem::replace(&mut write(&self.state).service_workers, true) {
+            return Ok(());
+        }
+        let params = json!({ "targetType": SERVICE_WORKER });
+        if let Err(error) = self
+            .client
+            .request(&self.watcher, "watchTargets", params)
+            .await
+        {
+            // A request that timed out may still have reached Firefox.
+            forget_service_workers(&self.state);
+            let _ = unwatch_service_worker_targets(&self.client, &self.watcher);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Stops following the tab's service workers: a one-way `unwatchTargets`,
+    /// and they are forgotten at once, for good: Firefox does not announce
+    /// their end, and announces a worker watched again under a new actor.
+    /// Nothing is sent if they are not watched.
+    pub fn unwatch_service_workers(&self) -> BidiResult<()> {
+        if !forget_service_workers(&self.state) {
+            return Ok(());
+        }
+        unwatch_service_worker_targets(&self.client, &self.watcher)
+    }
+
+    /// The tab's service workers alive, in the order announced; empty unless
+    /// [`Debugger::watch_service_workers`] was called.
+    ///
+    /// Firefox stops an idle service worker (after 30 s by default) and starts
+    /// it again on its next event, under a new target actor: the list changes
+    /// on its own.
+    pub fn service_worker_targets(&self) -> Vec<WorkerTarget> {
+        self.others(OtherTarget::worker)
+    }
+
+    /// The sources of the service worker target `target_actor` known so far;
+    /// empty for an unknown worker. A worker's sources go with its target:
+    /// while Firefox has it stopped there are none, and a column-less
+    /// breakpoint on its script fails as not loaded (give the column).
+    pub fn service_worker_sources(&self, target_actor: &str) -> Vec<SourceInfo> {
+        self.sources_of(target_actor, |target| target.worker().is_some())
+    }
+
+    /// Resource packets of `resource_type` from the tab's service workers
+    /// only: the packet's `from` is a [`WorkerTarget::actor`].
+    pub fn on_service_worker_resource(
+        &self,
+        resource_type: impl Into<String>,
+    ) -> EventFilter<RdpPacket> {
+        self.resources_from(resource_type.into(), from_service_worker)
     }
 
     /// Watches extra watcher resources (e.g. `"websocket"`, `"error-message"`).
@@ -602,9 +768,10 @@ impl Debugger {
         self.resources_from(resource_type.into(), from_current_target)
     }
 
-    /// Resource packets of `resource_type` from the current target or from
-    /// any of the tab's frames of another origin ([`Debugger::frame_targets`]):
-    /// the packet's `from` says which.
+    /// Resource packets of `resource_type` from the current target, from any
+    /// of the tab's frames of another origin ([`Debugger::frame_targets`]),
+    /// or from its service workers when watched
+    /// ([`Debugger::service_worker_targets`]): the packet's `from` says which.
     pub fn on_any_resource(&self, resource_type: impl Into<String>) -> EventFilter<RdpPacket> {
         self.resources_from(resource_type.into(), from_any_target)
     }
@@ -619,9 +786,10 @@ impl Debugger {
         let watcher = self.watcher.clone();
         EventFilter::with_predicate(self.client.subscribe(), move |packet| {
             // The background task may not have seen a target switch yet. The new
-            // target (the tab's, or a frame's) is announced on this stream before
-            // its resources, so applying it here keeps a pause right after a
-            // reload, or a frame's first pause, from being dropped.
+            // target (the tab's, a frame's or a service worker's) is announced on
+            // this stream before its resources, so applying it here keeps a pause
+            // right after a reload, or a frame's or a worker's first resources,
+            // from being dropped.
             if is_target_form(packet) {
                 apply(packet, &watcher, &state);
                 return false;
@@ -630,9 +798,10 @@ impl Debugger {
         })
     }
 
-    /// The thread states of the current target and of the tab's frames of
-    /// another origin; read them with [`parse_thread_states`], and tell the
-    /// frames apart by the packet's `from` (a [`FrameTarget::actor`]).
+    /// The thread states of the current target, of the tab's frames of
+    /// another origin and of its service workers when watched; read them with
+    /// [`parse_thread_states`], and tell the targets apart by the packet's
+    /// `from` (a [`FrameTarget::actor`] or a [`WorkerTarget::actor`]).
     pub fn on_any_thread_state(&self) -> EventFilter<RdpPacket> {
         self.on_any_resource("thread-state")
     }
@@ -642,9 +811,10 @@ impl Debugger {
         TargetThread::new(&self.client, &self.thread_actor(), &self.console_actor())
     }
 
-    /// The thread of the target `target_actor`: the current one, or one of
-    /// the tab's frames of another origin; `None` for a target this tab does
-    /// not have (gone, or never announced).
+    /// The thread of the target `target_actor`: the current one, one of the
+    /// tab's frames of another origin, or one of its service workers (when
+    /// watched); `None` for a target this tab does not have (gone, or never
+    /// announced).
     pub fn thread_of(&self, target_actor: &str) -> Option<TargetThread> {
         let state = read(&self.state);
         if let Some(current) = state.target.as_ref().filter(|t| t.actor == target_actor) {
@@ -655,13 +825,10 @@ impl Debugger {
             ));
         }
         state
-            .frames
+            .others
             .iter()
-            .find(|frame| frame.target.actor == target_actor)
-            .map(|frame| {
-                let target = &frame.target;
-                TargetThread::new(&self.client, &target.thread_actor, &target.console_actor)
-            })
+            .find(|other| other.target.actor() == target_actor)
+            .map(|other| other.target.thread(&self.client))
     }
 
     /// The tab's frames of another origin alive, in the order announced.
@@ -669,30 +836,41 @@ impl Debugger {
     /// Same-origin iframes share their parent's target, thread and sources:
     /// they are not here.
     pub fn frame_targets(&self) -> Vec<FrameTarget> {
-        read(&self.state)
-            .frames
-            .iter()
-            .map(|frame| frame.target.clone())
-            .collect()
+        self.others(OtherTarget::frame)
     }
 
     /// The sources of the frame target `target_actor` known so far; empty
     /// for an unknown frame. Sources created by `evaluate*` are left out.
     pub fn frame_sources(&self, target_actor: &str) -> Vec<SourceInfo> {
+        self.sources_of(target_actor, |target| target.frame().is_some())
+    }
+
+    /// The sources of the other target `target_actor`, if `kind` accepts it.
+    fn sources_of(&self, target_actor: &str, kind: fn(&OtherTarget) -> bool) -> Vec<SourceInfo> {
         read(&self.state)
-            .frames
+            .others
             .iter()
-            .find(|frame| frame.target.actor == target_actor)
-            .map(|frame| frame.sources.clone())
+            .find(|other| kind(&other.target) && other.target.actor() == target_actor)
+            .map(|other| other.sources.clone())
             .unwrap_or_default()
     }
 
-    /// The sources of the current target and of every frame target: what a
-    /// breakpoint by URL can bind in.
+    /// The sources of the current target and of every other target (frames,
+    /// service workers): what a breakpoint by URL can bind in.
     fn every_source(&self) -> Vec<SourceInfo> {
         let state = read(&self.state);
-        let frames = state.frames.iter().flat_map(|frame| frame.sources.iter());
-        state.sources.iter().chain(frames).cloned().collect()
+        let others = state.others.iter().flat_map(|other| other.sources.iter());
+        state.sources.iter().chain(others).cloned().collect()
+    }
+
+    /// The other targets `pick` keeps, in the order announced.
+    fn others<T: Clone>(&self, pick: fn(&OtherTarget) -> Option<&T>) -> Vec<T> {
+        read(&self.state)
+            .others
+            .iter()
+            .filter_map(|other| pick(&other.target))
+            .cloned()
+            .collect()
     }
 
     /// A breakpoint set earlier for the same place, when the caller gives no column.
@@ -782,14 +960,50 @@ fn is_target_form(packet: &RdpPacket) -> bool {
 }
 
 /// Whether `packet` was sent by the current top-level target or by one of
-/// the tab's frame targets.
+/// the tab's other targets (frames, service workers).
 fn from_any_target(state: &Shared, packet: &RdpPacket) -> bool {
     let Some(from) = packet.from.as_deref() else {
         return false;
     };
     let state = read(state);
     state.target.as_ref().is_some_and(|t| t.actor == from)
-        || state.frames.iter().any(|frame| frame.target.actor == from)
+        || state
+            .others
+            .iter()
+            .any(|other| other.target.actor() == from)
+}
+
+/// Whether `packet` was sent by one of the tab's service workers.
+fn from_service_worker(state: &Shared, packet: &RdpPacket) -> bool {
+    let Some(from) = packet.from.as_deref() else {
+        return false;
+    };
+    read(state).others.iter().any(|other| {
+        let worker = other.target.worker();
+        worker.is_some_and(|worker| worker.actor == from)
+    })
+}
+
+/// Stops following the service workers, forgetting them for good; whether
+/// they were followed.
+fn forget_service_workers(state: &Shared) -> bool {
+    let mut state = write(state);
+    let workers: Vec<String> = state
+        .others
+        .iter()
+        .filter_map(|other| other.target.worker())
+        .map(|worker| worker.actor.clone())
+        .collect();
+    for actor in &workers {
+        state.end(actor);
+    }
+    std::mem::take(&mut state.service_workers)
+}
+
+/// Stops watching the tab's service workers: one-way, Firefox never answers.
+fn unwatch_service_worker_targets(client: &RdpClient, watcher: &str) -> BidiResult<()> {
+    let params = json!({ "targetType": SERVICE_WORKER });
+    client.send_oneway(watcher, "unwatchTargets", params)
 }
 
 /// Adds the sources `packet` announces to `known`, but those `evaluate*`
@@ -803,40 +1017,42 @@ fn add_sources(known: &mut Vec<SourceInfo>, packet: &RdpPacket) {
     }
 }
 
-/// Records the frame target a `target-available-form` announces (replacing
-/// one with the same actor), or forgets the one a `target-destroyed-form`
-/// ends, with its sources.
-fn apply_frame_form(packet: &RdpPacket, state: &Shared) {
+/// Records the frame or service worker a `target-available-form` announces
+/// (replacing one with the same actor), or forgets the target a
+/// `target-destroyed-form` ends, with its sources.
+fn apply_other_form(packet: &RdpPacket, state: &Shared) {
+    let mut state = write(state);
     if packet.r#type.as_deref() == Some("target-destroyed-form") {
-        let actor = str_at(&packet.body, &["target", "actor"]);
-        write(state)
-            .frames
-            .retain(|frame| Some(frame.target.actor.as_str()) != actor);
+        if let Some(actor) = str_at(&packet.body, &["target", "actor"]) {
+            state.end(actor);
+        }
         return;
     }
-    let Some(target) = FrameTarget::from_form(&packet.body) else {
+    let Some(target) = OtherTarget::from_form(&packet.body, state.service_workers) else {
         return;
     };
-    let mut state = write(state);
-    // Applied by the background task and by every filter: only once.
-    if !state.frames.iter().any(|frame| frame.target == target) {
-        state
-            .frames
-            .retain(|frame| frame.target.actor != target.actor);
-        state.frames.push(FrameState {
-            target,
-            sources: Vec::new(),
-        });
+    // Applied by the background task and by every filter: only once, and
+    // never again once it ended.
+    let ended = state.ended.iter().any(|actor| actor == target.actor());
+    if ended || state.others.iter().any(|other| other.target == target) {
+        return;
     }
+    state
+        .others
+        .retain(|other| other.target.actor() != target.actor());
+    state.others.push(OtherState {
+        target,
+        sources: Vec::new(),
+    });
 }
 
 /// Updates the state with one notification of the connection.
 ///
 /// Several tabs can share a connection, so only this watcher's targets and the
-/// resources of the current target and of the tab's frames count.
+/// resources of the current target and of the tab's other targets count.
 fn apply(packet: &RdpPacket, watcher: &str, state: &Shared) {
     if is_target_form(packet) && packet.from.as_deref() == Some(watcher) {
-        apply_frame_form(packet, state);
+        apply_other_form(packet, state);
     }
     match packet.r#type.as_deref() {
         Some("target-available-form") if packet.from.as_deref() == Some(watcher) => {
@@ -859,12 +1075,12 @@ fn apply(packet: &RdpPacket, watcher: &str, state: &Shared) {
         Some("resources-available-array") => {
             let mut state = write(state);
             let from = packet.from.as_deref();
-            let frame = state
-                .frames
+            let other = state
+                .others
                 .iter_mut()
-                .find(|frame| Some(frame.target.actor.as_str()) == from);
-            if let Some(frame) = frame {
-                add_sources(&mut frame.sources, packet);
+                .find(|other| Some(other.target.actor()) == from);
+            if let Some(other) = other {
+                add_sources(&mut other.sources, packet);
             }
         }
         _ => {}
@@ -884,14 +1100,18 @@ async fn watch_bootstrap_resources(
     Ok(())
 }
 
-/// Stops watching resources and targets. Best effort and one-way: Firefox never
-/// answers these, and a dead connection has already dropped the watcher.
-fn unwatch(client: &RdpClient, watcher: &str, extra: &[String]) {
+/// Stops watching resources and targets, service workers too when
+/// `service_workers`. Best effort and one-way: Firefox never answers these, and
+/// a dead connection has already dropped the watcher.
+fn unwatch(client: &RdpClient, watcher: &str, extra: &[String], service_workers: bool) {
     let mut all: Vec<&str> = RESOURCE_TYPES.to_vec();
     all.extend(extra.iter().map(String::as_str));
     let resources = json!({ "resourceTypes": all });
     let _ = client.send_oneway(watcher, "unwatchResources", resources);
     let _ = client.send_oneway(watcher, "unwatchTargets", json!({ "targetType": "frame" }));
+    if service_workers {
+        let _ = unwatch_service_worker_targets(client, watcher);
+    }
 }
 
 /// Filters `requested` types according to `pred` against currently watched extra types.
@@ -2625,5 +2845,536 @@ mod tests {
             THREAD
         );
         assert!(debugger.thread_of("gone").is_none());
+    }
+
+    // The captured service worker (`rdp/sw-*.json`).
+    const WORKER: &str = "server1.conn3.watcher184.process26//workerTarget1/workerTarget5";
+    const WORKER_THREAD: &str = "server1.conn3.watcher184.process26//workerTarget1/thread1";
+    const WORKER_CONSOLE: &str = "server1.conn3.watcher184.process26//workerTarget1/console2";
+    const WORKER_SOURCE: &str = "server1.conn3.watcher184.process26//workerTarget1/source6";
+    const WORKER_SCRIPT: &str = "http://127.0.0.1:36631/sw/sw.js";
+
+    /// An attached debugger watching the tab's service workers, the captured
+    /// one announced with its `sw.js` source (the mock does it, after the
+    /// reply, as Firefox does).
+    async fn with_a_service_worker(overrides: Vec<RdpOverride>) -> (MockServer, Debugger) {
+        let (mut server, debugger) = attached(overrides).await;
+        debugger.watch_service_workers().await.expect("watch");
+        server.next_command_named("watchTargets").await;
+        eventually("the worker's source", || {
+            debugger
+                .every_source()
+                .iter()
+                .any(|source| source.actor == WORKER_SOURCE)
+        })
+        .await;
+        (server, debugger)
+    }
+
+    /// The next packet of `filter`, failing the test after 2 s.
+    async fn next_packet(filter: &mut EventFilter<RdpPacket>) -> RdpPacket {
+        timeout(WAIT, filter.next())
+            .await
+            .expect("a packet")
+            .expect("open")
+            .expect("no lag")
+    }
+
+    /// The captured worker's console messages, sent by `from`.
+    fn worker_console_from(from: &str) -> Value {
+        rdp_reply(from, fixture("rdp/sw-resources-console-message.json"))
+    }
+
+    /// DBG-67: `watch_service_workers` asks the watcher for service worker targets, once.
+    #[tokio::test]
+    async fn watch_service_workers_asks_the_watcher_once() {
+        // Given an attached debugger
+        let (mut server, debugger) = attached(vec![]).await;
+
+        // When it watches the tab's service workers, twice
+        debugger.watch_service_workers().await.expect("watch");
+        debugger.watch_service_workers().await.expect("again");
+
+        // Then the watcher was asked once, for service_worker targets
+        let command = server.next_command().await;
+        assert_eq!(
+            (command["to"].as_str(), command["type"].as_str()),
+            (Some(WATCHER), Some("watchTargets"))
+        );
+        assert_eq!(command["targetType"], "service_worker");
+        server.assert_no_command(QUIET).await;
+    }
+
+    /// DBG-68: A service worker is followed from its announcement to its end,
+    /// apart from the tab's frames; a restart comes under a new target actor.
+    #[tokio::test]
+    async fn service_workers_are_followed_while_alive() {
+        // Given a debugger following the captured service worker
+        let (server, debugger) = with_a_service_worker(vec![]).await;
+
+        // Then it is known with its actors, id and script
+        let expected = WorkerTarget {
+            actor: WORKER.to_string(),
+            thread_actor: WORKER_THREAD.to_string(),
+            console_actor: WORKER_CONSOLE.to_string(),
+            target_type: "service_worker".to_string(),
+            id: Some("d3aa6c32-5908-4563-a36a-d9c7040684f7".to_string()),
+            url: Some(WORKER_SCRIPT.to_string()),
+        };
+        assert_eq!(debugger.service_worker_targets(), [expected]);
+        // And its source is its own
+        let sources = debugger.service_worker_sources(WORKER);
+        assert_eq!(sources[0].url.as_deref(), Some(WORKER_SCRIPT));
+        // And it is neither a frame nor the tab's target
+        assert!(debugger.frame_targets().is_empty());
+        assert!(debugger.frame_sources(WORKER).is_empty());
+        assert_eq!(debugger.thread_actor(), THREAD);
+
+        // When Firefox stops it
+        server.push(from_watcher("rdp/sw-target-destroyed.json"));
+        // Then it is gone
+        eventually("the worker gone", || {
+            debugger.service_worker_targets().is_empty()
+        })
+        .await;
+
+        // When Firefox starts it again, under a new target actor
+        let mut restarted = from_watcher("rdp/sw-target-available.json");
+        restarted["target"]["actor"] = json!("W2");
+        server.push(restarted);
+        // Then the new target is followed
+        eventually("the restarted worker", || {
+            debugger
+                .service_worker_targets()
+                .iter()
+                .any(|w| w.actor == "W2")
+        })
+        .await;
+    }
+
+    /// DBG-69: Service worker targets are not followed unless watched.
+    #[tokio::test]
+    async fn service_workers_are_ignored_unless_watched() {
+        // Given an attached debugger that does not watch service workers
+        let (server, debugger) = attached(vec![]).await;
+
+        // When a service worker is announced, then a source of the current target, which marks the point
+        server.push(from_watcher("rdp/sw-target-available.json"));
+        server.push(sources_announced(
+            TARGET,
+            json!([{ "actor": "sentinel", "url": "u" }]),
+        ));
+
+        // Then no worker is followed
+        eventually("the sentinel", || {
+            debugger.sources().iter().any(|s| s.actor == "sentinel")
+        })
+        .await;
+        assert!(debugger.service_worker_targets().is_empty());
+    }
+
+    /// DBG-70: `on_service_worker_resource` only yields the service workers' packets.
+    #[tokio::test]
+    async fn on_service_worker_resource_yields_only_the_workers() {
+        // Given a debugger following a service worker, and a filter on its console messages
+        let (server, debugger) = with_a_service_worker(vec![]).await;
+        let mut console = debugger.on_service_worker_resource("console-message");
+
+        // When the tab's document logs, then the worker does
+        server.push(worker_console_from(TARGET));
+        server.push(fixture("rdp/sw-resources-console-message.json"));
+
+        // Then the first packet yielded is the worker's, its console.error included
+        let packet = next_packet(&mut console).await;
+        assert_eq!(packet.from.as_deref(), Some(WORKER));
+        let messages = parse_resources(&packet, "console-message");
+        assert_eq!(messages[1]["level"], "error");
+        assert_eq!(messages[1]["arguments"], json!(["sw console error"]));
+    }
+
+    /// DBG-71: A restarted service worker's first message is not dropped, and
+    /// `on_any_resource` yields it too.
+    #[tokio::test]
+    async fn a_restarted_service_workers_first_message_is_not_dropped() {
+        // Given filters on the workers' and on any target's console messages,
+        // and a background task that is not keeping up
+        let (server, debugger) = with_a_service_worker(vec![]).await;
+        let mut workers = debugger.on_service_worker_resource("console-message");
+        let mut any = debugger.on_any_resource("console-message");
+        follower_of(&debugger).abort();
+
+        // When Firefox starts the worker again under a new actor, which logs at once
+        let mut restarted = from_watcher("rdp/sw-target-available.json");
+        restarted["target"]["actor"] = json!("W2");
+        server.push(restarted);
+        server.push(worker_console_from("W2"));
+
+        // Then both filters yield its message
+        for filter in [&mut workers, &mut any] {
+            assert_eq!(next_packet(filter).await.from.as_deref(), Some("W2"));
+        }
+    }
+
+    /// DBG-72: `on_resource` leaves the service workers out.
+    #[tokio::test]
+    async fn on_resource_leaves_the_service_workers_out() {
+        // Given a debugger following a service worker, and a filter on the tab's console messages
+        let (server, debugger) = with_a_service_worker(vec![]).await;
+        let mut tab = debugger.on_resource("console-message");
+
+        // When the worker logs, then the tab's document does
+        server.push(fixture("rdp/sw-resources-console-message.json"));
+        server.push(worker_console_from(TARGET));
+
+        // Then the first packet yielded is the document's
+        assert_eq!(next_packet(&mut tab).await.from.as_deref(), Some(TARGET));
+    }
+
+    /// DBG-73: A column-less breakpoint resolves in a service worker's source,
+    /// and the worker's thread is reached by its target actor.
+    #[tokio::test]
+    async fn service_worker_breakpoints_and_threads() {
+        // Given a worker whose sw.js breaks on line 5 at columns 2 and 10, as captured
+        let reply = rdp_reply(WORKER_SOURCE, json!({ "positions": { "5": [2, 10] } }));
+        let overrides = vec![(
+            (WORKER_SOURCE, "getBreakpointPositionsCompressed"),
+            vec![reply],
+        )];
+        let (mut server, debugger) = with_a_service_worker(overrides).await;
+
+        // When a breakpoint is set on that line without a column
+        let bound = debugger
+            .set_breakpoint_resolved(&location(WORKER_SCRIPT, 5, None), None)
+            .await
+            .expect("set");
+
+        // Then it binds at the worker source's first column, through the breakpoint list
+        assert_eq!(bound.location.column, Some(2));
+        assert!(bound.resolved);
+        let command = server.next_command_named("setBreakpoint").await;
+        assert_eq!(command["to"], BP_LIST);
+        // And the worker's thread and console are reached by its target actor
+        let thread = debugger.thread_of(WORKER).expect("the worker's thread");
+        assert_eq!(
+            (thread.thread_actor(), thread.console_actor()),
+            (WORKER_THREAD, WORKER_CONSOLE)
+        );
+    }
+
+    /// DBG-74: `unwatch_service_workers` unwatches them one way and forgets them.
+    #[tokio::test]
+    async fn unwatch_service_workers_forgets_them() {
+        // Given a debugger following a service worker
+        let (mut server, debugger) = with_a_service_worker(vec![]).await;
+
+        // When it stops watching service workers
+        debugger.unwatch_service_workers().expect("unwatch");
+
+        // Then a one-way unwatchTargets for them went out
+        let command = server.next_command().await;
+        assert_eq!(
+            (command["to"].as_str(), command["type"].as_str()),
+            (Some(WATCHER), Some("unwatchTargets"))
+        );
+        assert_eq!(command["targetType"], "service_worker");
+        // And the worker is forgotten at once: Firefox may never say it ended
+        assert!(debugger.service_worker_targets().is_empty());
+        // And unwatching again sends nothing
+        debugger.unwatch_service_workers().expect("no-op");
+        server.assert_no_command(QUIET).await;
+
+        // When a form still in flight arrives, then a sentinel source of the tab
+        server.push(from_watcher("rdp/sw-target-available.json"));
+        server.push(sources_announced(
+            TARGET,
+            json!([{ "actor": "sentinel", "url": "u" }]),
+        ));
+        // Then the worker is not followed again
+        eventually("the sentinel", || {
+            debugger.sources().iter().any(|s| s.actor == "sentinel")
+        })
+        .await;
+        assert!(debugger.service_worker_targets().is_empty());
+
+        // When it watches them again, and Firefox announces the running worker under a new actor
+        debugger.watch_service_workers().await.expect("watch again");
+        let mut again = from_watcher("rdp/sw-target-available.json");
+        again["target"]["actor"] = json!("W2");
+        server.push(again);
+        // Then the request went out again, and only the new actor is followed:
+        // the mock's form of the forgotten actor is stale (Firefox never reuses one)
+        assert_eq!(
+            server.next_command_named("watchTargets").await["targetType"],
+            "service_worker"
+        );
+        eventually("the new actor", || {
+            !debugger.service_worker_targets().is_empty()
+        })
+        .await;
+        let actors: Vec<String> = debugger
+            .service_worker_targets()
+            .into_iter()
+            .map(|worker| worker.actor)
+            .collect();
+        assert_eq!(actors, ["W2"]);
+    }
+
+    /// DBG-75: `detach` also unwatches the service workers, after the frames.
+    #[tokio::test]
+    async fn detach_unwatches_the_service_workers_too() {
+        // Given a debugger following a service worker
+        let (mut server, debugger) = with_a_service_worker(vec![]).await;
+
+        // When it detaches
+        timeout(Duration::from_millis(500), debugger.detach())
+            .await
+            .expect("detach must not wait for the one-way unwatch requests")
+            .expect("detached");
+
+        // Then the resources, the frames and the service workers are unwatched, in that order
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let command = server.next_command().await;
+            seen.push((
+                command["type"].as_str().map(str::to_string),
+                command["targetType"].as_str().map(str::to_string),
+            ));
+        }
+        let expect =
+            |kind: &str, target: Option<&str>| (Some(kind.to_string()), target.map(str::to_string));
+        assert_eq!(
+            seen,
+            [
+                expect("unwatchResources", None),
+                expect("unwatchTargets", Some("frame")),
+                expect("unwatchTargets", Some("service_worker")),
+            ]
+        );
+    }
+
+    /// DBG-78: A source whose actor is gone (a worker Firefox stopped) is
+    /// skipped when resolving a column; the others are still asked.
+    #[tokio::test]
+    async fn a_dead_source_is_skipped_when_resolving_a_column() {
+        // Given two inline scripts of the page, the first one's actor gone
+        let gone = rdp_reply(SOURCE, json!({ "error": "noSuchActor", "message": "gone" }));
+        let second = rdp_reply(
+            SECOND,
+            fixture("rdp/breakpoint-positions-inline-second.json"),
+        );
+        let (server, debugger) = attached(vec![
+            ((SOURCE, "getBreakpointPositionsCompressed"), vec![gone]),
+            ((SECOND, "getBreakpointPositionsCompressed"), vec![second]),
+        ])
+        .await;
+        server.push(sources_announced(
+            TARGET,
+            json!([{ "actor": SECOND, "url": PAGE, "introductionType": "scriptElement" }]),
+        ));
+        eventually("the second inline script", || debugger.sources().len() == 2).await;
+
+        // Then line 9 still breaks in the second script
+        let at = debugger.breakable_column(PAGE, 9).await;
+        assert_eq!(at.expect("answered"), Breakable::At(2));
+
+        // And when the only source with the URL is gone, the URL counts as not loaded
+        let gone = rdp_reply(SOURCE, json!({ "error": "noSuchActor", "message": "gone" }));
+        let overrides = vec![((SOURCE, "getBreakpointPositionsCompressed"), vec![gone])];
+        let (_server, debugger) = attached(overrides).await;
+        let none = debugger.breakable_column(PAGE, 9).await;
+        assert_eq!(none.expect("answered"), Breakable::NotLoaded);
+    }
+
+    /// DBG-79: A target that ended is not brought back by an old form of it
+    /// (one a filter that lags behind replays).
+    #[tokio::test]
+    async fn an_ended_target_is_not_brought_back_by_an_old_form() {
+        // Given a followed service worker that Firefox stopped
+        let (server, debugger) = with_a_service_worker(vec![]).await;
+        server.push(from_watcher("rdp/sw-target-destroyed.json"));
+        eventually("the worker gone", || {
+            debugger.service_worker_targets().is_empty()
+        })
+        .await;
+
+        // When its old available form arrives again, then a sentinel source of the tab
+        server.push(from_watcher("rdp/sw-target-available.json"));
+        server.push(sources_announced(
+            TARGET,
+            json!([{ "actor": "sentinel", "url": "u" }]),
+        ));
+
+        // Then it is not followed again
+        eventually("the sentinel", || {
+            debugger.sources().iter().any(|s| s.actor == "sentinel")
+        })
+        .await;
+        assert!(debugger.service_worker_targets().is_empty());
+    }
+
+    /// Like Firefox, but refusing to watch service workers.
+    fn refusing_service_workers() -> crate::test_support::Handler {
+        let inner = rdp_firefox_like(vec![]);
+        Box::new(move |packet| {
+            if packet["targetType"] == "service_worker" && packet["type"] == "watchTargets" {
+                let refused = json!({ "error": "unknownError", "message": "refused" });
+                return vec![rdp_reply(WATCHER, refused)];
+            }
+            inner(packet)
+        })
+    }
+
+    /// DBG-80: A failed `watch_service_workers` unwatches them one way, and a
+    /// later call asks again.
+    #[tokio::test]
+    async fn a_failed_watch_of_service_workers_is_undone() {
+        // Given a Firefox that refuses to watch service workers
+        let mut server = MockServer::start_rdp(refusing_service_workers()).await;
+        let client = client_for(&server, TIMEOUT).await;
+        let debugger = Debugger::attach_selected(&client).await.expect("attach");
+        server.next_command_named("watchResources").await;
+
+        // When the debugger watches them
+        let error = failure(debugger.watch_service_workers().await);
+
+        // Then the refusal is returned, and a one-way unwatchTargets follows the request
+        assert!(
+            matches!(error, BidiError::ProtocolError { .. }),
+            "{error:?}"
+        );
+        for kind in ["watchTargets", "unwatchTargets"] {
+            let command = server.next_command().await;
+            assert_eq!(
+                (command["type"].as_str(), command["targetType"].as_str()),
+                (Some(kind), Some("service_worker"))
+            );
+        }
+        // And no worker is followed, and a second call asks again
+        assert!(debugger.service_worker_targets().is_empty());
+        let _ = debugger.watch_service_workers().await;
+        assert_eq!(server.next_command().await["type"], "watchTargets");
+    }
+
+    /// A page that registers `/sw.js`, then sets `window.ready`.
+    const SW_PAGE: &str = "<!doctype html><script>window.ready = navigator.serviceWorker\
+        .register('/sw.js').then(() => navigator.serviceWorker.ready)\
+        .then(r => r.active.state);</script>";
+    /// The worker: line 2 is breakable.
+    const SW_SCRIPT: &str = "self.addEventListener('message', () => {\n  console.log('sw');\n});\n";
+
+    /// Serves [`SW_PAGE`] and [`SW_SCRIPT`] (`/sw.js`), one request per connection.
+    async fn serve_a_service_worker(listener: tokio::net::TcpListener) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = [0u8; 2048];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            let worker = String::from_utf8_lossy(&request[..read]).starts_with("GET /sw.js");
+            let (kind, body) = if worker {
+                ("text/javascript", SW_SCRIPT)
+            } else {
+                ("text/html", SW_PAGE)
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    }
+
+    /// Evaluates `expression` in `tab`, awaiting its promise.
+    async fn evaluate_in(tab: &crate::tab::Tab, expression: &str) {
+        let params = json!({ "expression": expression, "target": tab.script_target(), "awaitPromise": true });
+        tab.send_raw_command("script.evaluate", params)
+            .await
+            .expect("evaluated");
+    }
+
+    /// Asks `debugger` where line 2 of `script` breaks until a source with
+    /// that URL is known, for up to `limit`.
+    async fn breakable_line_2(debugger: &Debugger, script: &str, limit: Duration) -> Breakable {
+        let deadline = Instant::now() + limit;
+        loop {
+            let found = debugger.breakable_column(script, 2).await.expect("asked");
+            if found != Breakable::NotLoaded || Instant::now() > deadline {
+                return found;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Breaks on line 2 of `script`, wakes the worker with a message, and
+    /// resumes the target that paused through its thread: that target's actor.
+    async fn pause_in_the_worker(
+        debugger: &Debugger,
+        tab: &crate::tab::Tab,
+        script: &str,
+    ) -> Option<String> {
+        let at = location(script, 2, None);
+        debugger.set_breakpoint(&at, None).await.expect("set");
+        let mut states = debugger.on_any_thread_state();
+        let wake =
+            "navigator.serviceWorker.ready.then(r => { r.active.postMessage('x'); return 1; })";
+        evaluate_in(tab, wake).await;
+        let packet = timeout(Duration::from_secs(5), states.next())
+            .await
+            .ok()??
+            .ok()?;
+        let paused = parse_thread_states(&packet)
+            .iter()
+            .any(|state| matches!(state, ThreadState::Paused { .. }));
+        let from = packet.from?;
+        debugger.thread_of(&from)?.resume().await.ok()?;
+        paused.then_some(from)
+    }
+
+    /// DBG-77: Real Firefox: the tab's service worker is followed, a
+    /// breakpoint binds in its script, and its pause is resumed through its thread.
+    #[tokio::test]
+    #[ignore = "needs a running Firefox on :9222 and :6000 (tests/firefox.sh start)"]
+    async fn real_firefox_follows_the_tabs_service_worker() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("port").port();
+        tokio::spawn(serve_a_service_worker(listener));
+        let limit = Duration::from_secs(5);
+        let browser = crate::browser::BrowserClient::connect("127.0.0.1:9222", limit)
+            .await
+            .expect("BiDi connect");
+        let rdp = RdpClient::connect("127.0.0.1:6000", limit)
+            .await
+            .expect("RDP connect");
+
+        // Given a tab whose page registered a service worker
+        let tab = browser
+            .new_tab(&format!("http://127.0.0.1:{port}/"))
+            .await
+            .expect("tab");
+        evaluate_in(&tab, "window.ready").await;
+
+        // When its debugger watches the tab's service workers
+        let debugger = Debugger::attach_to_context(&rdp, tab.context_id())
+            .await
+            .expect("attach");
+        debugger.watch_service_workers().await.expect("watch");
+
+        // Then the worker's script is known, a breakpoint can bind in it, and the worker is listed
+        let script = format!("http://127.0.0.1:{port}/sw.js");
+        let breakable = breakable_line_2(&debugger, &script, limit).await;
+        let workers = debugger.service_worker_targets();
+        // And the worker pauses there, and is resumed through its own thread
+        let paused = pause_in_the_worker(&debugger, &tab, &script).await;
+        let unregister = "navigator.serviceWorker.getRegistrations()\
+            .then(all => Promise.all(all.map(r => r.unregister())))";
+        evaluate_in(&tab, unregister).await;
+        let _ = debugger.detach().await;
+        let _ = tab.close().await;
+        let _ = browser.end().await;
+        assert!(matches!(breakable, Breakable::At(_)), "{breakable:?}");
+        let listed = |w: &WorkerTarget| w.is_service_worker() && w.url.as_deref() == Some(&script);
+        assert!(workers.iter().any(listed), "{workers:?}");
+        let paused = paused.expect("a pause, resumed through its thread");
+        assert!(workers.iter().any(|w| w.actor == paused), "{paused}");
     }
 }

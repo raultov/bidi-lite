@@ -1,0 +1,19 @@
+{
+  "from": "server1.conn3.watcher185",
+  "target": {
+    "actor": "server1.conn3.watcher184.process26//workerTarget1/workerTarget5",
+    "consoleActor": "server1.conn3.watcher184.process26//workerTarget1/console2",
+    "id": "d3aa6c32-5908-4563-a36a-d9c7040684f7",
+    "name": "",
+    "objectsManagerActor": "server1.conn3.watcher184.process26//workerTarget1/objects-manager4",
+    "targetType": "service_worker",
+    "threadActor": "server1.conn3.watcher184.process26//workerTarget1/thread1",
+    "tracerActor": "server1.conn3.watcher184.process26//workerTarget1/tracer3",
+    "traits": {
+      "supportsTopLevelTargetFlag": false
+    },
+    "type": 2,
+    "url": "http://127.0.0.1:36631/sw/sw.js"
+  },
+  "type": "target-available-form"
+}
