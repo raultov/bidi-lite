@@ -1,0 +1,20 @@
+{
+  "from": "server1.conn0.watcher59",
+  "target": {
+    "actor": "server1.conn0.watcher58.process8//workerTarget19/workerTarget5",
+    "consoleActor": "server1.conn0.watcher58.process8//workerTarget19/console2",
+    "id": "114418db-0bea-4620-8753-7213d0faf32a",
+    "name": "",
+    "objectsManagerActor": "server1.conn0.watcher58.process8//workerTarget19/objects-manager4",
+    "relatedDocumentInnerWindowId": 17179869185,
+    "targetType": "worker",
+    "threadActor": "server1.conn0.watcher58.process8//workerTarget19/thread1",
+    "tracerActor": "server1.conn0.watcher58.process8//workerTarget19/tracer3",
+    "traits": {
+      "supportsTopLevelTargetFlag": false
+    },
+    "type": 0,
+    "url": "http://127.0.0.1:38241/dw/worker.js"
+  },
+  "type": "target-available-form"
+}

@@ -537,6 +537,22 @@ const FIXTURES: &[(&str, &str)] = &[
         "rdp/thread-state-resumed.json",
         include_str!("../tests/fixtures/rdp/thread-state-resumed.json"),
     ),
+    (
+        "rdp/worker-resources-console-message.json",
+        include_str!("../tests/fixtures/rdp/worker-resources-console-message.json"),
+    ),
+    (
+        "rdp/worker-resources-sources.json",
+        include_str!("../tests/fixtures/rdp/worker-resources-sources.json"),
+    ),
+    (
+        "rdp/worker-target-available.json",
+        include_str!("../tests/fixtures/rdp/worker-target-available.json"),
+    ),
+    (
+        "rdp/worker-target-destroyed.json",
+        include_str!("../tests/fixtures/rdp/worker-target-destroyed.json"),
+    ),
 ];
 
 /// Parses the named fixture. Panics listing the known names if it is unknown.
@@ -716,14 +732,26 @@ fn default_rdp_replies(packet: &Value, to: &str, kind: &str) -> Vec<Value> {
 }
 
 /// Firefox announces the top-level target before its reply to `watchTargets`,
-/// but a service worker after it (the worker's target is created in the
-/// worker's process), followed by its sources, which a debugger watches.
+/// but a worker (service or dedicated) after it (the worker's target is
+/// created in the worker's thread), followed by its sources, which a debugger
+/// watches.
 fn watch_targets_replies(packet: &Value, to: &str) -> Vec<Value> {
-    if packet["targetType"] == "service_worker" {
+    let worker = match packet["targetType"].as_str() {
+        Some("service_worker") => Some((
+            "rdp/sw-target-available.json",
+            "rdp/sw-resources-sources.json",
+        )),
+        Some("worker") => Some((
+            "rdp/worker-target-available.json",
+            "rdp/worker-resources-sources.json",
+        )),
+        _ => None,
+    };
+    if let Some((form, sources)) = worker {
         return vec![
             rdp_reply(to, json!({})),
-            rdp_reply(to, fixture("rdp/sw-target-available.json")),
-            fixture("rdp/sw-resources-sources.json"),
+            rdp_reply(to, fixture(form)),
+            fixture(sources),
         ];
     }
     vec![
@@ -1051,10 +1079,11 @@ mod tests {
         assert!(!handler(&json!({ "to": "watcher1", "type": "watchTargets" })).is_empty());
     }
 
-    /// MCK-15: Asked to watch service workers, the RDP handler announces the
-    /// captured one after the reply, then its sources, like Firefox.
+    /// MCK-15: Asked to watch service workers or dedicated workers, the RDP
+    /// handler announces the captured one after the reply, then its sources,
+    /// like Firefox.
     #[test]
-    fn rdp_handler_announces_a_service_worker_after_the_reply() {
+    fn rdp_handler_announces_a_worker_after_the_reply() {
         // Given the Firefox-like RDP handler
         let handler = rdp_firefox_like(vec![]);
 
@@ -1077,6 +1106,20 @@ mod tests {
         assert_eq!(packets[1]["from"], "watcher1");
         assert_eq!(packets[1]["target"]["targetType"], "service_worker");
         assert_eq!(packets[2]["from"], packets[1]["target"]["actor"]);
+        // And dedicated workers are announced the same way, from the captured one
+        let workers =
+            handler(&json!({ "to": "watcher1", "type": "watchTargets", "targetType": "worker" }));
+        let kinds: Vec<Option<&str>> = workers.iter().map(|p| p["type"].as_str()).collect();
+        assert_eq!(
+            kinds,
+            [
+                None,
+                Some("target-available-form"),
+                Some("resources-available-array")
+            ]
+        );
+        assert_eq!(workers[1]["target"]["targetType"], "worker");
+        assert_eq!(workers[2]["from"], workers[1]["target"]["actor"]);
         // And the frame targets are still announced as before: the top-level target, then the reply
         let frames =
             handler(&json!({ "to": "watcher1", "type": "watchTargets", "targetType": "frame" }));

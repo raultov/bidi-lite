@@ -82,3 +82,21 @@ set to `false`:
   resources of the worker (`console.warn` and `console.error`, the latter with its `stacktrace`), from
   the worker's target. Firefox sent no `error-message` for the worker's uncaught errors, so none was
   captured.
+
+Captured in the dedicated worker probe (issue #2, Firefox 160.0.1, visible window, `tests/firefox.sh`) on
+a page of `127.0.0.1` that starts `/dw/worker.js` with `new Worker()`, the tab's watcher asked to
+`watchTargets` with `targetType: "worker"` and `dom.worker.console.dispatch_events_to_main_thread` set to
+`false`:
+- `worker-target-available.json`: `target-available-form` of the page's dedicated worker
+  (`targetType: "worker"`, `type: 0`, its `threadActor`, `consoleActor`, `id`, script `url` and the
+  `relatedDocumentInnerWindowId` of the page).
+- `worker-target-destroyed.json`: `target-destroyed-form` of the same worker (the tab closed).
+- `worker-resources-sources.json`: `resources-available-array` carrying the worker's `worker.js` source,
+  from the worker's target.
+- `worker-resources-console-message.json`: `resources-available-array` carrying two `console-message`
+  resources of the worker (`console.warn` with an object argument as a grip, and `console.error` with
+  its `stacktrace`), from the worker's target.
+
+In the `sw-*` and `worker-*` forms, `from` is the watcher (`watcher185`, `watcher59`) while the target
+actors start with another actor's prefix (`watcher184.process26//`, `watcher58.process8//`): the prefix
+is the content-process connection the watcher forwards through, as Firefox sent it, not an edit.

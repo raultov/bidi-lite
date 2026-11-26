@@ -1,0 +1,66 @@
+{
+  "array": [
+    [
+      "console-message",
+      [
+        {
+          "arguments": [
+            "dw warn",
+            {
+              "actor": "server1.conn0.watcher58.process8//workerTarget19/obj8",
+              "class": "Object",
+              "extensible": true,
+              "frozen": false,
+              "isError": false,
+              "ownPropertyLength": 1,
+              "preview": {
+                "kind": "Object",
+                "ownProperties": {
+                  "a": {
+                    "configurable": true,
+                    "enumerable": true,
+                    "value": 1,
+                    "writable": true
+                  }
+                },
+                "ownPropertiesLength": 1
+              },
+              "sealed": false,
+              "type": "object"
+            }
+          ],
+          "columnNumber": 11,
+          "filename": "http://127.0.0.1:38241/dw/worker.js",
+          "innerWindowID": 0,
+          "level": "warn",
+          "lineNumber": 4,
+          "sourceId": "server1.conn0.watcher58.process8//workerTarget19/source6",
+          "timeStamp": 1795726142687.598
+        },
+        {
+          "arguments": [
+            "dw error"
+          ],
+          "columnNumber": 11,
+          "filename": "http://127.0.0.1:38241/dw/worker.js",
+          "innerWindowID": 0,
+          "level": "error",
+          "lineNumber": 5,
+          "sourceId": "server1.conn0.watcher58.process8//workerTarget19/source6",
+          "stacktrace": [
+            {
+              "columnNumber": 11,
+              "filename": "http://127.0.0.1:38241/dw/worker.js",
+              "functionName": "onmessage",
+              "lineNumber": 5,
+              "sourceId": "server1.conn0.watcher58.process8//workerTarget19/source6"
+            }
+          ],
+          "timeStamp": 1795726142692.428
+        }
+      ]
+    ]
+  ],
+  "from": "server1.conn0.watcher58.process8//workerTarget19/workerTarget5",
+  "type": "resources-available-array"
+}

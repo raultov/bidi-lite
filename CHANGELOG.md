@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The `Debugger` follows the tab's dedicated workers once asked (#2), the way it
+  follows its service workers: `Debugger::watch_workers` (`watchTargets` with
+  `targetType: "worker"`), `Debugger::unwatch_workers`,
+  `Debugger::worker_targets`, `Debugger::worker_sources` and
+  `Debugger::on_worker_resource` (resource packets of the tab's dedicated
+  workers only). The workers of the tab's frames of another origin and nested
+  workers are followed too. `WorkerTarget::is_dedicated_worker`.
+- The README documents, as measured on Firefox 160, what a dedicated worker's
+  target reports (its console with the preference
+  `dom.worker.console.dispatch_events_to_main_thread` set to `false`, the
+  messages replayed when it is announced, its uncaught errors staying on the
+  page's `error-message`), and the other routes tried for a service worker's
+  uncaught errors and own requests (its descriptor has no watcher; the parent
+  process's watcher reports its requests, not its errors).
+
+### Changed
+- `Debugger::on_any_resource`, `on_any_thread_state`, `thread_of` and the
+  column resolution of `set_breakpoint` / `breakable_column` include the tab's
+  dedicated workers while they are watched; `Debugger::detach` unwatches them.
+  Nothing changes unless `watch_workers` is called.
+
 ## [0.1.6] - 2026-11-25
 
 ### Added

@@ -74,12 +74,15 @@ const WORKER_TARGET_TYPES: [&str; 3] = ["worker", "shared_worker", "service_work
 /// A worker with a target of its own: its thread, console and sources.
 ///
 /// The [`Debugger`](crate::rdp::debugger::Debugger) follows the tab's
-/// service workers once asked to
-/// ([`Debugger::watch_service_workers`](crate::rdp::debugger::Debugger::watch_service_workers)).
+/// dedicated workers and service workers once asked to
+/// ([`Debugger::watch_workers`](crate::rdp::debugger::Debugger::watch_workers),
+/// [`Debugger::watch_service_workers`](crate::rdp::debugger::Debugger::watch_service_workers)).
 /// The tab's watcher announces each one with a `target-available-form` of
-/// `targetType: "service_worker"`, and its end with a `target-destroyed-form`:
-/// Firefox stops an idle service worker and starts it again on its next
-/// event, under a new target actor with the same [`WorkerTarget::id`].
+/// `targetType: "worker"` or `"service_worker"`, and its end with a
+/// `target-destroyed-form`. Firefox stops an idle service worker and starts it
+/// again on its next event, under a new target actor with the same
+/// [`WorkerTarget::id`]; a dedicated worker ends when it is terminated or its
+/// document goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerTarget {
     /// The target actor: its resources (sources, console messages, thread
@@ -118,6 +121,12 @@ impl WorkerTarget {
     /// Whether it is a service worker.
     pub fn is_service_worker(&self) -> bool {
         self.target_type == "service_worker"
+    }
+
+    /// Whether it is a dedicated worker (`targetType: "worker"`), one a
+    /// document or another worker started with `new Worker()`.
+    pub fn is_dedicated_worker(&self) -> bool {
+        self.target_type == "worker"
     }
 }
 
@@ -679,6 +688,35 @@ mod tests {
                 "{frame}"
             );
         }
+        assert!(FrameTarget::from_form(&available).is_none());
+    }
+
+    /// DBG-86: `WorkerTarget` reads a captured dedicated worker form, and
+    /// tells it from a service worker.
+    #[test]
+    fn worker_target_reads_a_dedicated_worker_form() {
+        // Given the dedicated worker form Firefox 160 announced
+        let available = fixture("rdp/worker-target-available.json");
+
+        // When it is read
+        let worker = WorkerTarget::from_form(&available).expect("a worker");
+
+        // Then it is a dedicated worker, not a service worker, with its actors, id and script
+        assert_eq!(worker.target_type, "worker");
+        assert!(worker.is_dedicated_worker());
+        assert!(!worker.is_service_worker());
+        assert!(worker.thread_actor.ends_with("/thread1"));
+        assert_eq!(
+            worker.url.as_deref(),
+            Some("http://127.0.0.1:38241/dw/worker.js")
+        );
+        // And the service worker is not a dedicated one
+        let service = WorkerTarget::from_form(&fixture("rdp/sw-target-available.json"));
+        assert!(!service.expect("a worker").is_dedicated_worker());
+        // And its destroyed form names the same worker
+        let destroyed = fixture("rdp/worker-target-destroyed.json");
+        assert_eq!(WorkerTarget::from_form(&destroyed), Some(worker));
+        // And it is no frame
         assert!(FrameTarget::from_form(&available).is_none());
     }
 

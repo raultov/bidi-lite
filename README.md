@@ -405,12 +405,55 @@ for worker in debugger.service_worker_targets() {
 
   It applies to **every** worker: the console calls of dedicated workers then
   no longer reach BiDi's `log.entryAdded` nor the page's `console-message`
-  either (measured on Firefox 160).
+  either (measured on Firefox 160). Follow the dedicated workers too (below)
+  to read theirs from their own targets.
 * **Not reported by the tab's watcher** (Firefox 160): a worker's uncaught
   errors (no `error-message` from any target; `console.error` calls do arrive)
   and the requests the worker itself makes (no `network-event`). The page's
   requests that the worker answers are the page's own `network-event`s, with
-  `fromServiceWorker: true` in their updates.
+  `fromServiceWorker: true` in their updates. Other routes, measured: the
+  worker's own descriptor (a content process target's `listWorkers`) has no
+  `getWatcher`; the parent process's watcher (`root.getProcess {id: 0}`, then
+  `getWatcher`, as the Browser Toolbox does) does report the worker's own
+  requests as `network-event`s (`browsingContextID: -1`,
+  `cause.loadingDocumentUri` the worker's script), among every other request
+  of the browser, but not its uncaught errors either, even following process
+  and service worker targets. Those errors reach no watcher: a Firefox limit.
+
+### Dedicated workers
+
+The workers a page starts with `new Worker()` are followed the same way, once
+asked:
+
+```rust
+debugger.watch_resources(&["console-message"]).await?;
+let mut worker_console = debugger.on_worker_resource("console-message");
+debugger.watch_workers().await?; // `detach()` unwatches them
+for worker in debugger.worker_targets() {
+    let scripts = debugger.worker_sources(&worker.actor);
+}
+```
+
+* Followed (Firefox 160): the workers of the page, those of its frames of
+  another origin, and nested ones (started by a worker), each announced with
+  `targetType: "worker"` shortly after `watchTargets` answers, or when it
+  starts. One ends with a `target-destroyed-form` when it is terminated or its
+  document goes (a navigation).
+* `on_worker_resource(kind)` yields only their packets; `on_any_resource(kind)`
+  and `on_any_thread_state()` include them; breakpoints bind in their scripts
+  and `thread_of(&worker.actor)` resumes a pause. Service workers are kept
+  apart: `worker_targets()` and `on_worker_resource` never include them.
+* **Their console** comes from their own targets only with the preference
+  above set to `false`: levels, arguments (objects as grips of the worker) and
+  the stack of `console.error`. By default it comes from the page's (or the
+  frame's) target, as BiDi's `log.entryAdded` does.
+* Each announcement first replays the console messages the worker logged
+  before; watching again announces the running workers under new actors and
+  replays them again.
+* Their uncaught errors stay on the page's target: an `error-message` with
+  `category: "Web Worker"`, whatever the preference; their targets send none,
+  so they are not reported twice. Their requests are the watcher's
+  `network-event`s, as the page's are.
 
 ### Watching Extra RDP Resources (WebSocket frames, console, errors)
 
@@ -458,6 +501,9 @@ debugger.unwatch_resources(&["websocket"])?;
   Firefox 160. Their console messages need
   `dom.worker.console.dispatch_events_to_main_thread` set to `false`; their
   uncaught errors and their own requests do not reach the tab's watcher.
+* **Dedicated workers** are followed once watched, validated on Firefox 160;
+  their console comes from their own targets only with that same preference.
+  Shared workers are not followed.
 * **Requests to the same RDP actor are serialised**, and one that is never
   answered blocks its actor's queue until the connection is replaced.
 * **A breakpoint outlives its debugger.** Unwatching does not remove
